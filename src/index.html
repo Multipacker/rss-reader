@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+
+<html lang="en-us">
+    <head>
+        <title>RSS Feed</title>
+        <meta charset="UTF-8"></meta>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0"></meta>
+        <script src="index.js"></script>
+        <link rel="stylesheet" href="style.css"></script>
+    </head>
+    <body style="margin: 0;">
+        <main style="display: flex; flex-direction: column;">
+            <h1 style="text-align: center;">RSS Feed</h1>
+            <div style="display: flex;">
+                <select id="search_type" oninput="update_list();">
+                    <option>Articles</option>
+                    <option>Feeds</option>
+                </select>
+                <input id="search" placeholder="Search..." type="search" style="flex: 1;" oninput="update_list();"></input>
+            </div>
+            <div id="results" style="overflow-y: scroll; flex: 1;">
+            </div>
+        </main>
+    </body>
+</html>
