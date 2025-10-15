@@ -221,7 +221,7 @@ const updateFeeds = async () => {
 
                         if (entry.published) {
                             article.published = new Date(entry.published["#text"]);
-                        } else if (entry.published) {
+                        } else if (entry.updated) {
                             article.published = new Date(entry.updated["#text"]);
                         }
 
