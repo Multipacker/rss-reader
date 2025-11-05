@@ -54,7 +54,7 @@ const feeds = new Map();
 }
 
 const updateFeeds = async () => {
-    console.group("Update feeds");
+    console.group(`Update feeds (${(new Date()).toLocaleString("sv-SE", { timeZoneName: "longOffset", })})`);
 
     // NOTE(simon): Download feeds.
     console.time("Downloading feeds");
