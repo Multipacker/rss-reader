@@ -98,7 +98,7 @@ const updateFeeds = async () => {
             // NOTE(simon): Fill out default values.
             const feed = {
                 title:       undefined,
-                description: undefined,
+                description: "",
                 link:        undefined,
                 id:          undefined,
                 articles:    [],
