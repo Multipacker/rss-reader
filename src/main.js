@@ -291,4 +291,6 @@ const updateFeeds = async () => {
 };
 
 await updateFeeds();
-setInterval(updateFeeds, config.interval * 60 * 60 * 1000);
+const updateInterval = setInterval(updateFeeds, config.interval * 60 * 60 * 1000);
+
+process.on("SIGTERM", () => clearInterval(updateInterval));
