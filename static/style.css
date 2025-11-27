@@ -1,0 +1,109 @@
+:root {
+    --oc-gray0: #f8f9faff;
+    --oc-gray1: #f1f3f5ff;
+    --oc-gray2: #e9ecefff;
+    --oc-gray3: #dee2e6ff;
+    --oc-gray4: #ced4daff;
+    --oc-gray5: #adb5bdff;
+    --oc-gray6: #868e96ff;
+    --oc-gray7: #495057ff;
+    --oc-gray8: #343a40ff;
+    --oc-gray9: #212529ff;
+
+    --oc-orange6: #fd7e14ff;
+}
+
+@media (prefers-color-scheme: light) {
+    :root {
+        --text-color:              var(--oc-gray9);
+        --weak-text-color:         var(--oc-gray7);
+        --base-background-color:   var(--oc-gray0);
+        --base-border-color:       var(--oc-gray1);
+        --button-background-color: var(--oc-gray2);
+        --button-border-color:     var(--oc-gray3);
+        --selection-color:         var(--oc-gray6);
+        --focus-color:             var(--oc-orange6);
+        --hover-color:             var(--oc-gray6);
+    }
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        --text-color:              var(--oc-gray0);
+        --weak-text-color:         var(--oc-gray5);
+        --base-background-color:   var(--oc-gray9);
+        --base-border-color:       var(--oc-gray8);
+        --button-background-color: var(--oc-gray8);
+        --button-border-color:     var(--oc-gray7);
+        --selection-color:         var(--oc-gray6);
+        --focus-color:             var(--oc-orange6);
+        --hover-color:             var(--oc-gray4);
+    }
+}
+
+body {
+    font-size: 16pt;
+    font-family: sans-serif;
+
+    color: var(--text-color);
+    background: var(--base-background-color);
+}
+
+main {
+    width: min(820px, 100%);
+    height: 100vh;
+    margin-left: auto;
+    margin-right: auto;
+}
+
+:focus {
+    outline: 1px solid var(--focus-color);
+}
+
+::selection {
+    background: var(--selection-color);
+}
+
+mark {
+    background-color: color-mix(in srgb, var(--focus-color) 50%, transparent);
+    color: inherit;
+}
+
+input:hover, select:hover, button:hover {
+    background-color: color-mix(in srgb, var(--hover-color) 20%, var(--button-background-color));
+}
+
+input, select, button {
+    font: inherit;
+    color: inherit;
+    background-color: var(--button-background-color);
+    border: 2px solid var(--button-border-color);
+    transition: background-color 0.3s;
+}
+
+input::placeholder {
+    color: var(--weak-text-color);
+}
+
+.item {
+    display: flex;
+    flex-direction: row;
+    justify-content: space-between;
+    border: 2px solid var(--base-border-color);
+    padding: 10px;
+}
+
+.item a {
+    color: inherit;
+    outline: none;
+}
+
+.item.read a {
+    color: var(--weak-text-color);
+}
+
+.item p {
+    font-size: 0.7em;
+    color: var(--weak-text-color);
+    margin: 0;
+}
