@@ -208,6 +208,7 @@ func main() {
 
 	var feeds []Feed
 
+	beforeFetch := time.Now()
 	for _, url := range urls {
 		log.Println(url)
 		if resp, err := http.Get(url); err == nil {
@@ -324,7 +325,9 @@ func main() {
 			log.Print(err)
 		}
 	}
+	log.Printf("Downloading feeds: %s\n", time.Since(beforeFetch))
 
+	beforeInserts := time.Now()
 	batch := &pgx.Batch{}
 	for _, feed := range feeds {
 		feedQuery := `
@@ -365,6 +368,7 @@ func main() {
 	if err := results.Close(); err != nil {
 		fmt.Println(err)
 	}
+	log.Printf("Updating store: %s\n", time.Since(beforeInserts))
 
 	/*
 	// Build the address to listen on from environment variables ADDR and PORT.
