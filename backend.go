@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -324,64 +325,46 @@ func main() {
 		}
 	}
 
+	batch := &pgx.Batch{}
 	for _, feed := range feeds {
-		_, err := dbpool.Exec(
-			context.Background(),
-			`
-			INSERT INTO Feeds VALUES ($1, $2, $3, $4, $5)
+		feedQuery := `
+			INSERT INTO Feeds VALUES (@id, @title, @description, @link, @updated)
 			ON CONFLICT (id) DO
-			UPDATE SET title = $2, description = $3, link = $4, updated = $5
-			WHERE Feeds.updated < $5
-			`,
-			feed.Id,
-			feed.Title,
-			feed.Description,
-			feed.Link,
-			feed.Updated,
-		);
-
-		if err != nil {
-			fmt.Printf("Failed to insert %v: %v\n", feed.Id, err)
+			UPDATE SET title = @title, description = @description, link = @link, updated = @updated
+			WHERE Feeds.updated < @updated
+		`
+		args := pgx.NamedArgs{
+			"id":          feed.Id,
+			"title":       feed.Title,
+			"description": feed.Description,
+			"link":        feed.Link,
+			"updated":     feed.Updated,
 		}
+		batch.Queue(feedQuery, args)
 
+		entryQuery := `
+			INSERT INTO Entries VALUES (@id, @feed, @title, @published, @updated, @link)
+			ON CONFLICT (id, feed) DO
+			UPDATE SET title = @title, updated = @updated, link = @link
+			WHERE Entries.updated < @updated
+		`
 		for _, entry := range feed.Entries {
-			_, err := dbpool.Exec(
-				context.Background(),
-				`
-				INSERT INTO Entries VALUES ($1, $2, $3, $4, $5, $6)
-				ON CONFLICT (id, feed) DO
-				UPDATE SET title = $3, updated = $5, link = $6
-				WHERE Entries.updated < $5
-				`,
-				entry.Id,
-				feed.Id,
-				entry.Title,
-				entry.Published,
-				entry.Updated,
-				entry.Link,
-			);
-
-			if err != nil {
-				fmt.Printf("Failed to insert %v: %v\n", feed.Id, err)
+			args := pgx.NamedArgs{
+				"id":        entry.Id,
+				"feed":      feed.Id,
+				"title":     entry.Title,
+				"published": entry.Published,
+				"updated":   entry.Updated,
+				"link":      entry.Link,
 			}
+			batch.Queue(entryQuery, args)
 		}
 	}
 
-	/*for _, feed := range feeds {
-		fmt.Printf("title:       %v\n", feed.Title)
-		fmt.Printf("description: %v\n", feed.Description)
-		fmt.Printf("id:          %v\n", feed.Id)
-		fmt.Printf("link:        %v\n", feed.Link)
-		fmt.Printf("updated:     %v\n", feed.Updated)
-		fmt.Printf("Entries:\n")
-		for _, entry := range feed.Entries {
-			fmt.Printf("\ttitle: %v\n", entry.Title)
-			fmt.Printf("\t\tid:        %v\n", entry.Id)
-			fmt.Printf("\t\tpublished: %v\n", entry.Published)
-			fmt.Printf("\t\tupdated:   %v\n", entry.Updated)
-			fmt.Printf("\t\tlink:      %v\n", entry.Link)
-		}
-	}*/
+	results := dbpool.SendBatch(context.Background(), batch)
+	if err := results.Close(); err != nil {
+		fmt.Println(err)
+	}
 
 	/*
 	// Build the address to listen on from environment variables ADDR and PORT.
