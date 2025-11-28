@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/xml"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -136,18 +137,63 @@ func parseAtomDateOrNow(raw string) time.Time {
 	return time.Now()
 }
 
+var db *pgxpool.Pool
+
+func handleFeeds(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		return
+	}
+
+	query := `SELECT * FROM Entries ORDER BY updated DESC`
+	rows, err := db.Query(context.Background(), query)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		log.Println(err)
+		return
+	}
+
+	type Entry struct {
+		Id        string    `json:"id"`
+		Feed      string    `json:"feed"`
+		Title     string    `json:"title"`
+		Published time.Time `json:"published"`
+		Updated   time.Time `json:"updated"`
+		Link      string    `json:"link"`
+	}
+	parsedRows, err := pgx.CollectRows(rows, pgx.RowToStructByName[Entry])
+
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		log.Println(err)
+		return
+	}
+
+	encoded, err := json.Marshal(parsedRows)
+
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		log.Println(err)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(encoded)
+}
+
 func main() {
 	// Configure the logger to give more accurate timing information.
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
 
-	dbpool, err := pgxpool.New(context.Background(), os.Getenv("DATABASE_URL"))
+	var err error
+	db, err = pgxpool.New(context.Background(), os.Getenv("DATABASE_URL"))
 	if err != nil {
 		log.Fatalf("Unable to create connection pool: %v\n", err)
 	}
-	defer dbpool.Close()
+	defer db.Close()
 
 
-	_, err = dbpool.Exec(
+	_, err = db.Exec(
 		context.Background(),
 		`
 		CREATE TABLE IF NOT EXISTS Feeds (
@@ -162,7 +208,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to create Feeds table: %v\n", err)
 	}
-	_, err = dbpool.Exec(
+	_, err = db.Exec(
 		context.Background(),
 		`
 		CREATE TABLE IF NOT EXISTS Entries (
@@ -364,13 +410,12 @@ func main() {
 		}
 	}
 
-	results := dbpool.SendBatch(context.Background(), batch)
+	results := db.SendBatch(context.Background(), batch)
 	if err := results.Close(); err != nil {
 		fmt.Println(err)
 	}
 	log.Printf("Updating store: %s\n", time.Since(beforeInserts))
 
-	/*
 	// Build the address to listen on from environment variables ADDR and PORT.
 	host := "localhost"
 	port := "8080"
@@ -385,11 +430,11 @@ func main() {
 	// Configure the routes.
 	fileServer := http.FileServer(http.Dir("static"))
 	http.Handle("/", fileServer)
+	http.HandleFunc("/feeds", handleFeeds)
 
 	// Start the server with the configured address and the handlers configured above.
 	log.Printf("Serving on http://%s", address)
 	if err := http.ListenAndServe(address, nil); err != nil {
 		log.Fatal(err)
 	}
-	*/
 }
