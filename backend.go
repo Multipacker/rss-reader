@@ -1,12 +1,16 @@
 package main
 
 import (
+	"context"
 	"encoding/xml"
 	"fmt"
 	"log"
-	"time"
-	"strings"
 	"net/http"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type RssItem struct {
@@ -135,30 +139,70 @@ func main() {
 	// Configure the logger to give more accurate timing information.
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
 
+	dbpool, err := pgxpool.New(context.Background(), os.Getenv("DATABASE_URL"))
+	if err != nil {
+		log.Fatalf("Unable to create connection pool: %v\n", err)
+	}
+	defer dbpool.Close()
+
+
+	_, err = dbpool.Exec(
+		context.Background(),
+		`
+		CREATE TABLE IF NOT EXISTS Feeds (
+			id          TEXT NOT NULL PRIMARY KEY,
+			title       TEXT NOT NULL,
+			description TEXT NOT NULL,
+			link        TEXT NOT NULL,
+			updated     TIMESTAMP WITH TIME ZONE NOT NULL
+		)
+		`,
+	)
+	if err != nil {
+		log.Fatalf("Failed to create Feeds table: %v\n", err)
+	}
+	_, err = dbpool.Exec(
+		context.Background(),
+		`
+		CREATE TABLE IF NOT EXISTS Entries (
+			id        TEXT NOT NULL,
+			feed      TEXT NOT NULL,
+			title     TEXT NOT NULL,
+			published TIMESTAMP WITH TIME ZONE NOT NULL,
+			updated   TIMESTAMP WITH TIME ZONE NOT NULL,
+			link      TEXT NOT NULL,
+			PRIMARY KEY (id, feed)
+		)
+		`,
+	)
+	if err != nil {
+		log.Fatalf("Failed to create Feeds table: %v\n", err)
+	}
+
 	urls := []string{
-        "https://nullprogram.com/feed/",
-        "https://fgiesen.wordpress.com/feed/",
-        "https://tonsky.me/atom.xml",
-        "https://xeiaso.net/blog.rss",
-        "https://jakubtomsu.github.io/index.xml",
-        "https://ashhhleyyy.dev/blog.rss",
-        "https://caseymuratori.com/blog_atom.rss",
-        "https://cbloomrants.blogspot.com/feeds/posts/default",
-        "https://drewdevault.com/blog/index.xml",
-        "https://www.eno-writer.com/feed/",
-        "https://fabiensanglard.net/rss.xml",
-        "https://acorneroftheweb.com/index.xml",
-        "https://www.internalpointers.com/rss",
-        "https://calabro.io/rss",
-        "https://loganforman.com/rss.xml",
-        "https://www.newroadoldway.com/feed.xml",
-        "https://nrk.neocities.org/rss.xml",
-        "https://orlp.net/blog/atom.xml",
-        "https://preshing.com/feed",
-        "https://probablydance.com/feed/",
-        "https://rachel.cafe/feed.xml",
-        "https://floooh.github.io/feed.xml",
-        "https://xorvoid.com/rss.xml",
+		"https://nullprogram.com/feed/",
+		"https://fgiesen.wordpress.com/feed/",
+		"https://tonsky.me/atom.xml",
+		"https://xeiaso.net/blog.rss",
+		"https://jakubtomsu.github.io/index.xml",
+		"https://ashhhleyyy.dev/blog.rss",
+		"https://caseymuratori.com/blog_atom.rss",
+		"https://cbloomrants.blogspot.com/feeds/posts/default",
+		"https://drewdevault.com/blog/index.xml",
+		"https://www.eno-writer.com/feed/",
+		"https://fabiensanglard.net/rss.xml",
+		"https://acorneroftheweb.com/index.xml",
+		"https://www.internalpointers.com/rss",
+		"https://calabro.io/rss",
+		"https://loganforman.com/rss.xml",
+		"https://www.newroadoldway.com/feed.xml",
+		"https://nrk.neocities.org/rss.xml",
+		"https://orlp.net/blog/atom.xml",
+		"https://preshing.com/feed",
+		"https://probablydance.com/feed/",
+		"https://rachel.cafe/feed.xml",
+		"https://floooh.github.io/feed.xml",
+		"https://xorvoid.com/rss.xml",
 	}
 
 	var feeds []Feed
@@ -252,6 +296,7 @@ func main() {
 						break
 					}
 				}
+				feed.Updated = parseAtomDateOrNow(atomFeed.Updated)
 
 				for _, atomEntry := range atomFeed.Entries {
 					var entry Entry
@@ -280,6 +325,49 @@ func main() {
 	}
 
 	for _, feed := range feeds {
+		_, err := dbpool.Exec(
+			context.Background(),
+			`
+			INSERT INTO Feeds VALUES ($1, $2, $3, $4, $5)
+			ON CONFLICT (id) DO
+			UPDATE SET title = $2, description = $3, link = $4, updated = $5
+			WHERE Feeds.updated < $5
+			`,
+			feed.Id,
+			feed.Title,
+			feed.Description,
+			feed.Link,
+			feed.Updated,
+		);
+
+		if err != nil {
+			fmt.Printf("Failed to insert %v: %v\n", feed.Id, err)
+		}
+
+		for _, entry := range feed.Entries {
+			_, err := dbpool.Exec(
+				context.Background(),
+				`
+				INSERT INTO Entries VALUES ($1, $2, $3, $4, $5, $6)
+				ON CONFLICT (id, feed) DO
+				UPDATE SET title = $3, updated = $5, link = $6
+				WHERE Entries.updated < $5
+				`,
+				entry.Id,
+				feed.Id,
+				entry.Title,
+				entry.Published,
+				entry.Updated,
+				entry.Link,
+			);
+
+			if err != nil {
+				fmt.Printf("Failed to insert %v: %v\n", feed.Id, err)
+			}
+		}
+	}
+
+	/*for _, feed := range feeds {
 		fmt.Printf("title:       %v\n", feed.Title)
 		fmt.Printf("description: %v\n", feed.Description)
 		fmt.Printf("id:          %v\n", feed.Id)
@@ -293,7 +381,7 @@ func main() {
 			fmt.Printf("\t\tupdated:   %v\n", entry.Updated)
 			fmt.Printf("\t\tlink:      %v\n", entry.Link)
 		}
-	}
+	}*/
 
 	/*
 	// Build the address to listen on from environment variables ADDR and PORT.
