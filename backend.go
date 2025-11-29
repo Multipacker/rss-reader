@@ -144,14 +144,14 @@ func parseAtomDateOrNow(raw string) time.Time {
 var db *pgxpool.Pool
 var config Config
 
-func handleFeeds(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "GET" {
+func handleFeeds(w http.ResponseWriter, request *http.Request) {
+	if request.Method != "GET" {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
 
-	query := `SELECT * FROM Feeds`
-	rows, err := db.Query(context.Background(), query)
+	query := `SELECT * FROM Feeds;`
+	rows, err := db.Query(request.Context(), query)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		log.Println(err)
@@ -179,14 +179,14 @@ func handleFeeds(w http.ResponseWriter, r *http.Request) {
 	w.Write(encoded)
 }
 
-func handleEntries(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "GET" {
+func handleEntries(w http.ResponseWriter, request *http.Request) {
+	if request.Method != "GET" {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
 
-	query := `SELECT * FROM Entries ORDER BY published DESC`
-	rows, err := db.Query(context.Background(), query)
+	query := `SELECT * FROM Entries ORDER BY published DESC;`
+	rows, err := db.Query(request.Context(), query)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		log.Println(err)
