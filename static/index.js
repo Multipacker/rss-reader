@@ -1,26 +1,30 @@
-let feeds = [];
-let articles = [];
+let feeds = new Map();
+let entries = [];
 
-// NOTE(simon): Load and unpack feeds, then update the results list.
-fetch("feeds.json")
+// NOTE(simon): Load and unpack feeds and entries, then update the results list.
+fetch("feeds")
     .then(response => response.json())
     .then(rawFeeds => {
-        feeds = rawFeeds.map(rawFeed => {
-            const feed = { ...rawFeed };
-            feed.update = new Date(feed.updated);
-            return feed;
-        });
+        rawFeeds.forEach(rawFeed => {
+            const feed = {
+                title:       rawFeed.title,
+                description: rawFeed.description,
+                link:        rawFeed.link,
+                updated:     new Date(rawFeed.updated),
+            };
 
-        articles = rawFeeds.flatMap(feed => feed
-            .articles.map(article => ({
-                author:    feed.title,
-                title:     article.title,
-                link:      article.link,
-                id:        article.id,
-                published: new Date(article.published),
-                updated:   new Date(article.updated),
-            }))
-        );
+            feeds.set(rawFeed.id, feed);
+        });
+    });
+fetch("entries")
+    .then(response => response.json())
+    .then(rawEntries => {
+        entries = rawEntries.flatMap(rawEntry => {
+            const entry = { ...rawEntry };
+            entry.published = new Date(entry.published);
+            entry.update    = new Date(entry.update);
+            return entry;
+        });
     })
     .then(() => update_list());
 
@@ -55,9 +59,12 @@ const update_list = () => {
     switch (search_type.value) {
         case "Articles": {
             result_list.replaceChildren(
-                ...articles
+                ...entries
                 .map(item => {
                     let new_item = {...item};
+
+                    const feed = feeds.get(item.feed);
+                    new_item.author = feed.title ?? "";
 
                     new_item.title_matches = 0;
                     new_item.author_matches = 0;
@@ -99,6 +106,7 @@ const update_list = () => {
         case "Feeds": {
             result_list.replaceChildren(
                 ...feeds
+                .values()
                 .map(feed => {
                     let new_feed = {...feed};
 
@@ -114,6 +122,7 @@ const update_list = () => {
                 .filter(feed => {
                     return feed.title_matches >= search_terms.length || feed.description_matches >= search_terms.length;
                 })
+                .toArray()
                 .sort((a, b) => {
                     // NOTE(simon): More title matches should appear earlier.
                     if (a.title_matches !== b.title_matches) {
