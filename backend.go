@@ -19,57 +19,6 @@ type Config struct {
 	Urls []string `json:"urls"`
 }
 
-type RssItem struct {
-	XMLName xml.Name `xml:"item"`
-	Title   string   `xml:"title"`
-	Link    string   `xml:"link"`
-	Guid    string   `xml:"guid"`
-	PubDate string   `xml:"pubDate"`
-}
-
-type RssLink struct {
-	XMLName  xml.Name `xml:"link"`
-	Href     string   `xml:"href,attr"`
-	Rel      string   `xml:"rel,attr"`
-	Chardata string   `xml:",chardata"`
-}
-
-type RssFeed struct {
-	XMLName       xml.Name  `xml:"rss"`
-	Title         string    `xml:"channel>title"`
-	Description   string    `xml:"channel>description"`
-	LastBuildDate string    `xml:"channel>lastBuildDate"`
-	Links         []RssLink `xml:"channel>link"`
-	Items         []RssItem `xml:"channel>item"`
-}
-
-type AtomLink struct {
-	XMLName  xml.Name `xml:"link"`
-	Href     string   `xml:"href,attr"`
-	Rel      string   `xml:"rel,attr"`
-	Chardata string   `xml:",chardata"`
-
-}
-
-type AtomEntry struct {
-	XMLName   xml.Name   `xml:"entry"`
-	Title     string     `xml:"title"`
-	Id        string     `xml:"id"`
-	Published string     `xml:"published"`
-	Updated   string     `xml:"updated"`
-	Links     []AtomLink `xml:"link"`
-}
-
-type AtomFeed struct {
-	XMLName  xml.Name    `xml:"feed"`
-	Title    string      `xml:"title"`
-	Subtitle string      `xml:"subtitle"`
-	Id       string      `xml:"id"`
-	Links    []AtomLink  `xml:"link"`
-	Updated  string      `xml:"updated"`
-	Entries  []AtomEntry `xml:"entry"`
-}
-
 type Entry struct {
 	Id        string    `json:"id"`
 	Feed      string    `json:"feed"`
@@ -120,7 +69,7 @@ func parseRssDateOrNow(raw string) time.Time {
 		return parsed
 	}
 
-	log.Printf("Failed to parse \"%v\" as a date", raw)
+	log.Printf("Failed to parse \"%v\" as a RSS date", raw)
 
 	return time.Now()
 }
@@ -136,7 +85,7 @@ func parseAtomDateOrNow(raw string) time.Time {
 		return parsed
 	}
 
-	log.Printf("Failed to parse \"%v\" as a date", raw)
+	log.Printf("Failed to parse \"%v\" as an Atom date", raw)
 
 	return time.Now()
 }
@@ -214,138 +163,198 @@ func handleEntries(w http.ResponseWriter, request *http.Request) {
 	w.Write(encoded)
 }
 
+func feedFromUrl(url string) (feed Feed, entries []Entry, err error) {
+	var resp *http.Response
+	resp, err = http.Get(url)
+	if err != nil {
+		return
+	}
+
+	var decoder *xml.Decoder
+	if resp.StatusCode == http.StatusOK {
+		decoder = xml.NewDecoder(resp.Body)
+	} else {
+		err = fmt.Errorf("Get %s: %s", url, resp.Status)
+	}
+
+	// NOTE(simon): Find the first start element to determine the kind of feed we have.
+	var startToken xml.StartElement
+	for startToken.Name.Local == "" && err == nil {
+		var token xml.Token
+		token, err = decoder.Token()
+
+		if err != nil {
+			break
+		}
+
+		switch token := token.(type) {
+		case xml.StartElement:
+			startToken = token
+		}
+	}
+
+	switch startToken.Name.Local {
+	case "rss":
+		type RssItem struct {
+			XMLName xml.Name `xml:"item"`
+			Title   string   `xml:"title"`
+			Link    string   `xml:"link"`
+			Guid    string   `xml:"guid"`
+			PubDate string   `xml:"pubDate"`
+		}
+
+		type RssLink struct {
+			XMLName  xml.Name `xml:"link"`
+			Href     string   `xml:"href,attr"`
+			Rel      string   `xml:"rel,attr"`
+			Chardata string   `xml:",chardata"`
+		}
+
+		type RssFeed struct {
+			XMLName       xml.Name  `xml:"rss"`
+			Title         string    `xml:"channel>title"`
+			Description   string    `xml:"channel>description"`
+			LastBuildDate string    `xml:"channel>lastBuildDate"`
+			Links         []RssLink `xml:"channel>link"`
+			Items         []RssItem `xml:"channel>item"`
+		}
+
+		// NOTE(simon): Attempt to parse the feed.
+		var rssFeed RssFeed
+		err = decoder.DecodeElement(&rssFeed, &startToken)
+		if err != nil {
+			rssFeed = RssFeed{}
+		}
+
+		// NOTE(simon): Restructure to our internal format.
+		feed.Title       = rssFeed.Title
+		feed.Description = rssFeed.Description
+		feed.Updated     = parseRssDateOrNow(rssFeed.LastBuildDate)
+		feed.Link        = url
+		for _, link := range rssFeed.Links {
+			if link.Rel == "self" {
+				feed.Link = link.Href
+				break
+			}
+		}
+		feed.Id = feed.Link
+
+		for _, item := range rssFeed.Items {
+			var entry Entry
+			entry.Feed  = feed.Id
+			entry.Title = item.Title
+			entry.Link  = item.Link
+			if item.Guid != "" {
+				entry.Id = item.Guid
+			} else {
+				entry.Id = entry.Link
+			}
+			entry.Published = parseRssDateOrNow(item.PubDate)
+			entry.Updated   = entry.Published
+
+			entries = append(entries, entry)
+		}
+	case "feed":
+		type AtomLink struct {
+			XMLName  xml.Name `xml:"link"`
+			Href     string   `xml:"href,attr"`
+			Rel      string   `xml:"rel,attr"`
+			Chardata string   `xml:",chardata"`
+
+		}
+
+		type AtomEntry struct {
+			XMLName   xml.Name   `xml:"entry"`
+			Title     string     `xml:"title"`
+			Id        string     `xml:"id"`
+			Published string     `xml:"published"`
+			Updated   string     `xml:"updated"`
+			Links     []AtomLink `xml:"link"`
+		}
+
+		type AtomFeed struct {
+			XMLName  xml.Name    `xml:"feed"`
+			Title    string      `xml:"title"`
+			Subtitle string      `xml:"subtitle"`
+			Id       string      `xml:"id"`
+			Links    []AtomLink  `xml:"link"`
+			Updated  string      `xml:"updated"`
+			Entries  []AtomEntry `xml:"entry"`
+		}
+
+		// NOTE(simon): Attempt to parse the feed.
+		var atomFeed AtomFeed
+		err = decoder.DecodeElement(&atomFeed, &startToken)
+		if err != nil {
+			atomFeed = AtomFeed{}
+		}
+
+		// NOTE(simon): Restructure to our internal format.
+		feed.Title       = atomFeed.Title
+		feed.Description = atomFeed.Subtitle
+		feed.Id          = atomFeed.Id
+		feed.Link        = url
+		for _, link := range atomFeed.Links {
+			if link.Rel == "self" {
+				feed.Link = link.Href
+				break
+			}
+		}
+		feed.Updated = parseAtomDateOrNow(atomFeed.Updated)
+
+		for _, atomEntry := range atomFeed.Entries {
+			var entry Entry
+			entry.Feed = feed.Id
+			entry.Title = atomEntry.Title
+			entry.Id    = atomEntry.Id
+			for _, link := range atomEntry.Links {
+				if link.Rel == "alternate" || link.Rel == "" {
+					entry.Link = link.Href
+					break
+				}
+			}
+
+			entry.Updated = parseAtomDateOrNow(atomEntry.Updated)
+			if atomEntry.Published == "" {
+				entry.Published = entry.Updated
+			} else {
+				entry.Published = parseAtomDateOrNow(atomEntry.Published)
+			}
+
+			entries = append(entries, entry)
+		}
+	default:
+		if err == nil {
+			err = fmt.Errorf("Unknown feed type \"%v\"\n", startToken.Name.Local)
+		}
+	}
+
+	resp.Body.Close()
+	return
+}
+
 func update() {
-	updateDuration := 24 * 60 * 60 * 1000 * 1000 * 1000
+	var updateDuration time.Duration = 24 * 60 * 60 * 1000 * 1000 * 1000
 	updateFeedsTick := time.Tick(updateDuration)
 
 	for {
+		log.Println("Updating feeds")
+
 		var feeds []Feed
 		var entries[]Entry
 
 		beforeFetch := time.Now()
-		for _, url := range config.Urls {
-			log.Println(url)
-			if resp, err := http.Get(url); err == nil {
-				defer resp.Body.Close()
+		for _, url := range config.Urls[0:0] {
+			newFeed, newEntries, err := feedFromUrl(url)
 
-				if resp.StatusCode != 200 {
-					log.Printf("Get %s: %s", url, resp.Status)
-					continue
-				}
-
-				decoder := xml.NewDecoder(resp.Body)
-
-				// NOTE(simon): Find the first start element to determine the kind of feed we have.
-				var startToken xml.StartElement
-				for startToken.Name.Local == "" {
-					token, err := decoder.Token()
-
-					if err != nil {
-						log.Println(err)
-						break
-					}
-
-					switch token := token.(type) {
-					case xml.StartElement:
-						startToken = token
-					}
-				}
-
-				switch startToken.Name.Local {
-				case "rss":
-					var rssFeed RssFeed
-
-					// NOTE(simon): Attempt to parse the feed.
-					if err := decoder.DecodeElement(&rssFeed, &startToken); err != nil {
-						log.Println(err)
-						continue
-					}
-
-					// NOTE(simon): Restructure to our internal format.
-					var feed Feed
-					feed.Title       = rssFeed.Title
-					feed.Description = rssFeed.Description
-					feed.Updated     = parseRssDateOrNow(rssFeed.LastBuildDate)
-					feed.Link        = url
-					for _, link := range rssFeed.Links {
-						if link.Rel == "self" {
-							feed.Link = link.Href
-							break
-						}
-					}
-					feed.Id = feed.Link
-
-					for _, item := range rssFeed.Items {
-						var entry Entry
-						entry.Feed = feed.Id
-						entry.Title = item.Title
-						entry.Link  = item.Link
-						if item.Guid != "" {
-							entry.Id = item.Guid
-						} else {
-							entry.Id = entry.Link
-						}
-						entry.Published = parseRssDateOrNow(item.PubDate)
-						entry.Updated   = entry.Published
-
-						entries = append(entries, entry)
-					}
-
-					feeds = append(feeds, feed)
-				case "feed":
-					var atomFeed AtomFeed
-
-					// NOTE(simon): Attempt to parse the feed.
-					if err := decoder.DecodeElement(&atomFeed, &startToken); err != nil {
-						log.Println(err)
-						continue
-					}
-
-					// NOTE(simon): Restructure to our internal format.
-					var feed Feed
-					feed.Title       = atomFeed.Title
-					feed.Description = atomFeed.Subtitle
-					feed.Id          = atomFeed.Id
-					feed.Link        = url
-					for _, link := range atomFeed.Links {
-						if link.Rel == "self" {
-							feed.Link = link.Href
-							break
-						}
-					}
-					feed.Updated = parseAtomDateOrNow(atomFeed.Updated)
-
-					for _, atomEntry := range atomFeed.Entries {
-						var entry Entry
-						entry.Feed = feed.Id
-						entry.Title = atomEntry.Title
-						entry.Id    = atomEntry.Id
-						for _, link := range atomEntry.Links {
-							if link.Rel == "alternate" || link.Rel == "" {
-								entry.Link = link.Href
-								break
-							}
-						}
-
-						entry.Updated = parseAtomDateOrNow(atomEntry.Updated)
-						if atomEntry.Published == "" {
-							entry.Published = entry.Updated
-						} else {
-							entry.Published = parseAtomDateOrNow(atomEntry.Published)
-						}
-
-						entries = append(entries, entry)
-					}
-
-					feeds = append(feeds, feed)
-				default:
-					log.Printf("Unknown feed type \"%v\"\n", startToken.Name.Local)
-				}
+			if err == nil {
+				feeds = append(feeds, newFeed)
+				entries = append(entries, newEntries...)
 			} else {
-				log.Print(err)
+				log.Println(err)
 			}
 		}
-		log.Printf("Downloading feeds: %s\n", time.Since(beforeFetch))
+		log.Printf("Downloaded feeds: %s\n", time.Since(beforeFetch))
 
 		beforeInserts := time.Now()
 		batch := &pgx.Batch{}
@@ -354,7 +363,7 @@ func update() {
 				INSERT INTO Feeds VALUES (@id, @title, @description, @link, @updated)
 				ON CONFLICT (id) DO
 				UPDATE SET title = @title, description = @description, link = @link, updated = @updated
-				WHERE Feeds.updated < @updated
+				WHERE Feeds.updated < @updated;
 			`
 			args := pgx.NamedArgs{
 				"id":          feed.Id,
@@ -371,7 +380,7 @@ func update() {
 				INSERT INTO Entries VALUES (@id, @feed, @title, @published, @updated, @link)
 				ON CONFLICT (id, feed) DO
 				UPDATE SET title = @title, updated = @updated, link = @link
-				WHERE Entries.updated < @updated
+				WHERE Entries.updated < @updated;
 			`
 			args := pgx.NamedArgs{
 				"id":        entry.Id,
@@ -388,7 +397,7 @@ func update() {
 		if err := results.Close(); err != nil {
 			fmt.Println(err)
 		}
-		log.Printf("Updating store: %s\n", time.Since(beforeInserts))
+		log.Printf("Updated store: %s\n", time.Since(beforeInserts))
 
 		// NOTE(simon): Wait for next update tick.
 		<- updateFeedsTick
@@ -428,15 +437,7 @@ func main() {
 			description TEXT NOT NULL,
 			link        TEXT NOT NULL,
 			updated     TIMESTAMP WITH TIME ZONE NOT NULL
-		)
-		`,
-	)
-	if err != nil {
-		log.Fatalf("Failed to create 'Feeds' table: %v\n", err)
-	}
-	_, err = db.Exec(
-		context.Background(),
-		`
+		);
 		CREATE TABLE IF NOT EXISTS Entries (
 			id        TEXT NOT NULL,
 			feed      TEXT NOT NULL,
@@ -445,11 +446,11 @@ func main() {
 			updated   TIMESTAMP WITH TIME ZONE NOT NULL,
 			link      TEXT NOT NULL,
 			PRIMARY KEY (id, feed)
-		)
+		);
 		`,
 	)
 	if err != nil {
-		log.Fatalf("Failed to create 'Entries' table: %v\n", err)
+		log.Fatalf("Failed to create tables: %v\n", err)
 	}
 
 	// NOTE(simon): Start update routing in a separte goroutine.
