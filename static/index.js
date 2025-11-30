@@ -39,6 +39,19 @@ const save_read = (id) => {
     update_list();
 };
 
+// NOTE(simon): Assumes that the text to be highlighted is interleaved between
+// non-highlighted elements. That is, items at odd indicies should be
+// highlighted.
+const highlight = (parts) => parts.map((value, index) => {
+    if (index % 2 == 1) {
+        const mark = document.createElement("mark");
+        mark.textContent = value;
+        return mark;
+    } else {
+        return document.createTextNode(value);
+    }
+});
+
 const update_list = () => {
     // NOTE(simon): Acquire DOM elements.
     const search_type = document.getElementById("search_type");
@@ -50,12 +63,15 @@ const update_list = () => {
         .split(/\s+/)
         .filter(term => term.length !== 0)
     const search_regex = new RegExp(
+        "(" +
         search_terms
-            .map(term => `(${RegExp.escape(term)})`)
-            .join("|"),
-        "ig"
+            .map(term => `(?:${RegExp.escape(term)})`)
+            .join("|") +
+        ")",
+        "i"
     );
 
+    const template = document.getElementById("template");
     switch (search_type.value) {
         case "Articles": {
             result_list.replaceChildren(
@@ -66,11 +82,16 @@ const update_list = () => {
                     const feed = feeds.get(item.feed);
                     new_item.author = feed.title ?? "";
 
-                    new_item.title_matches = 0;
-                    new_item.author_matches = 0;
                     if (search_terms.length !== 0) {
-                        new_item.title = new_item.title.replace(search_regex, match => { ++new_item.title_matches; return `<mark>${match}</mark>`; });
-                        new_item.author = new_item.author.replace(search_regex, match => { ++new_item.author_matches; return `<mark>${match}</mark>`; });
+                        new_item.title  = new_item.title.split(search_regex);
+                        new_item.author = new_item.author.split(search_regex);
+                        new_item.title_matches  = Math.floor((new_item.title.length - 1) / 2);
+                        new_item.author_matches = Math.floor((new_item.author.length - 1) / 2);
+                    } else {
+                        new_item.title  = [new_item.title];
+                        new_item.author = [new_item.author];
+                        new_item.title_matches  = 0;
+                        new_item.author_matches = 0;
                     }
 
                     return new_item;
@@ -93,12 +114,20 @@ const update_list = () => {
                     return b.published - a.published;
                 })
                 .map(item => {
-                    const elem = document.createElement("div")
-                    elem.classList.add("item");
+                    const elem = document.importNode(template.content, true);
+
+                    const htmlItem        = elem.querySelector(".item");
+                    const itemLink        = elem.querySelector(".item-link");
+                    const itemDescription = elem.querySelector(".item-description");
+
                     if (read_articles.has(item.id)) {
-                        elem.classList.add("read");
+                        htmlItem.classList.add("read");
                     }
-                    elem.innerHTML = `<div><a href="${item.link}" onclick="save_read('${item.id}');">${item.title}</a><p>${item.author} ${item.published.toLocaleString()}</p></div>`;
+                    itemLink.append(...highlight(item.title));
+                    itemLink.setAttribute("href", item.link);
+                    itemLink.onclick = () => save_read(item.id);
+                    itemDescription.append(...highlight(item.author), document.createTextNode(` ${item.published.toLocaleString()}`));
+
                     return elem;
                 })
             );
@@ -110,11 +139,16 @@ const update_list = () => {
                 .map(feed => {
                     let new_feed = {...feed};
 
-                    new_feed.title_matches = 0;
-                    new_feed.description_matches = 0;
                     if (search_terms.length !== 0) {
-                        new_feed.title = new_feed.title.replace(search_regex, match => { ++new_feed.title_matches; return `<mark>${match}</mark>`; });
-                        new_feed.description = new_feed.description.replace(search_regex, match => { ++new_feed.description_matches; return `<mark>${match}</mark>`; });
+                        new_feed.title       = new_feed.title.split(search_regex);
+                        new_feed.description = new_feed.description.split(search_regex);
+                        new_feed.title_matches       = Math.floor((new_feed.title.length - 1) / 2);
+                        new_feed.description_matches = Math.floor((new_feed.description.length - 1) / 2);
+                    } else {
+                        new_feed.title       = [new_feed.title];
+                        new_feed.description = [new_feed.description];
+                        new_feed.title_matches       = 0;
+                        new_feed.description_matches = 0;
                     }
 
                     return new_feed;
@@ -138,9 +172,15 @@ const update_list = () => {
                     return b.updated - a.updated
                 })
                 .map(feed => {
-                    const elem = document.createElement("div")
-                    elem.classList.add("item");
-                    elem.innerHTML = `<div><a href="${feed.link}">${feed.title}</a><p>${feed.description}</p></div>`;
+                    const elem = document.importNode(template.content, true);
+
+                    const itemLink        = elem.querySelector(".item-link");
+                    const itemDescription = elem.querySelector(".item-description");
+
+                    itemLink.append(...highlight(feed.title));
+                    itemLink.setAttribute("href", feed.link);
+                    itemDescription.append(...highlight(feed.description));
+
                     return elem;
                 })
             );
