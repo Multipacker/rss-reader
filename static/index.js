@@ -33,10 +33,6 @@ const read_articles = new Set(JSON.parse(localStorage.getItem("read_articles")))
 const save_read = (id) => {
     read_articles.add(id);
     localStorage.setItem("read_articles", JSON.stringify([...read_articles.values()]));
-
-    // NOTE(simon): A bit wasteful to recalculate all list items, but this way
-    // the link state will be correct when returning from the article.
-    update_list();
 };
 
 // NOTE(simon): Assumes that the text to be highlighted is interleaved between
@@ -150,7 +146,10 @@ const update_list = () => {
                 if (read_articles.has(item.id)) {
                     htmlItem.classList.add("read");
                 }
-                itemLink.onclick = () => save_read(item.id);
+                itemLink.onclick = () => {
+                    htmlItem.classList.add("read");
+                    save_read(item.id);
+                }
             }
 
             itemLink.append(...highlight(item.title));
