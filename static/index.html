@@ -15,7 +15,12 @@
         </template>
         <main style="display: flex; flex-direction: column;">
             <h1 style="text-align: center;">RSS Feed</h1>
-            <div style="display: flex;">
+            <div style="display: flex; flex-wrap: wrap; justify-content: center;">
+                <select id="search_filter" oninput="update_list();">
+                    <option>All</option>
+                    <option>Read</option>
+                    <option>Unread</option>
+                </select>
                 <select id="search_type" oninput="update_list();">
                     <option>Articles</option>
                     <option>Feeds</option>

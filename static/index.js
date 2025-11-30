@@ -50,9 +50,10 @@ const highlight = (parts) => parts.map((value, index) => {
 
 const update_list = () => {
     // NOTE(simon): Acquire DOM elements.
-    const search_type = document.getElementById("search_type");
-    const search      = document.getElementById("search");
-    const result_list = document.getElementById("results");
+    const search_filter = document.getElementById("search_filter");
+    const search_type   = document.getElementById("search_type");
+    const search        = document.getElementById("search");
+    const result_list   = document.getElementById("results");
 
     // NOTE(simon): Construct queries.
     const search_terms = search.value
@@ -119,6 +120,16 @@ const update_list = () => {
             return item;
         })
         .filter(item => {
+            if (item.readable) {
+                const isRead = read_articles.has(item.id);
+                if (search_filter.value === "Read" && !isRead) {
+                    return false;
+                }
+                if (search_filter.value === "Unread" && isRead) {
+                    return false;
+                }
+            }
+
             return item.title_matches >= search_terms.length || item.description_matches >= search_terms.length;
         })
         .sort((a, b) => {
