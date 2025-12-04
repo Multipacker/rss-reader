@@ -1,5 +1,10 @@
 package main
 
+// TODO(simon): To-do list in order or execution
+// * Save the date something got imported into the database
+// * Server side search
+// * Pagination
+
 import (
 	"context"
 	"encoding/xml"
@@ -344,7 +349,7 @@ func update() {
 		var entries[]Entry
 
 		beforeFetch := time.Now()
-		for _, url := range config.Urls[0:0] {
+		for _, url := range config.Urls {
 			newFeed, newEntries, err := feedFromUrl(url)
 
 			if err == nil {
