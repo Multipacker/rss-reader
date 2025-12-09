@@ -343,7 +343,7 @@ func update() {
 	var updateDuration time.Duration = 24 * 60 * 60 * 1000 * 1000 * 1000
 	updateFeedsTick := time.Tick(updateDuration)
 
-	for {
+	for ; ; <- updateFeedsTick {
 		type Fetch struct {
 			feed    Feed
 			entries []Entry
@@ -417,9 +417,6 @@ func update() {
 			fmt.Println(err)
 		}
 		log.Printf("\tUpdated store: %s\n", time.Since(beforeInserts))
-
-		// NOTE(simon): Wait for next update tick.
-		<- updateFeedsTick
 	}
 }
 
