@@ -343,27 +343,34 @@ func update() {
 	updateFeedsTick := time.Tick(updateDuration)
 
 	for {
+		type Fetch struct {
+			feed    Feed
+			entries []Entry
+			err     error
+		}
+
 		log.Println("Updating feeds")
 
-		var feeds []Feed
-		var entries[]Entry
-
+		// NOTE(simon): Dispatch all fetches.
 		beforeFetch := time.Now()
+		responseCh := make(chan Fetch, len(config.Urls))
 		for _, url := range config.Urls {
-			newFeed, newEntries, err := feedFromUrl(url)
-
-			if err == nil {
-				feeds = append(feeds, newFeed)
-				entries = append(entries, newEntries...)
-			} else {
-				log.Println(err)
-			}
+			go func(url string) {
+				feed, entries, err := feedFromUrl(url)
+				responseCh <- Fetch{feed, entries, err}
+			}(url)
 		}
-		log.Printf("Downloaded feeds: %s\n", time.Since(beforeFetch))
 
-		beforeInserts := time.Now()
+		// NOTE(simon): Collect results and prepare database batch inserts.
 		batch := &pgx.Batch{}
-		for _, feed := range feeds {
+		for range config.Urls {
+			fetch := <- responseCh
+
+			if fetch.err != nil {
+				log.Println(fetch.err)
+				continue
+			}
+
 			feedQuery := `
 				INSERT INTO Feeds VALUES (@id, @title, @description, @link, @updated)
 				ON CONFLICT (id) DO
@@ -371,38 +378,41 @@ func update() {
 				WHERE Feeds.updated < @updated;
 			`
 			args := pgx.NamedArgs{
-				"id":          feed.Id,
-				"title":       feed.Title,
-				"description": feed.Description,
-				"link":        feed.Link,
-				"updated":     feed.Updated,
+				"id":          fetch.feed.Id,
+				"title":       fetch.feed.Title,
+				"description": fetch.feed.Description,
+				"link":        fetch.feed.Link,
+				"updated":     fetch.feed.Updated,
 			}
 			batch.Queue(feedQuery, args)
 
-		}
-		for _, entry := range entries {
-			entryQuery := `
-				INSERT INTO Entries VALUES (@id, @feed, @title, @published, @updated, @link)
-				ON CONFLICT (id, feed) DO
-				UPDATE SET title = @title, updated = @updated, link = @link
-				WHERE Entries.updated < @updated;
-			`
-			args := pgx.NamedArgs{
-				"id":        entry.Id,
-				"feed":      entry.Feed,
-				"title":     entry.Title,
-				"published": entry.Published,
-				"updated":   entry.Updated,
-				"link":      entry.Link,
+			for _, entry := range fetch.entries {
+				entryQuery := `
+					INSERT INTO Entries VALUES (@id, @feed, @title, @published, @updated, @link)
+					ON CONFLICT (id, feed) DO
+					UPDATE SET title = @title, updated = @updated, link = @link
+					WHERE Entries.updated < @updated;
+				`
+				args := pgx.NamedArgs{
+					"id":        entry.Id,
+					"feed":      entry.Feed,
+					"title":     entry.Title,
+					"published": entry.Published,
+					"updated":   entry.Updated,
+					"link":      entry.Link,
+				}
+				batch.Queue(entryQuery, args)
 			}
-			batch.Queue(entryQuery, args)
 		}
+		log.Printf("\tDownloaded feeds: %s\n", time.Since(beforeFetch))
 
+		// NOTE(simon): Execute batch inserts.
+		beforeInserts := time.Now()
 		results := db.SendBatch(context.Background(), batch)
 		if err := results.Close(); err != nil {
 			fmt.Println(err)
 		}
-		log.Printf("Updated store: %s\n", time.Since(beforeInserts))
+		log.Printf("\tUpdated store: %s\n", time.Since(beforeInserts))
 
 		// NOTE(simon): Wait for next update tick.
 		<- updateFeedsTick
