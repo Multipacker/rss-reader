@@ -7,13 +7,14 @@ package main
 
 import (
 	"context"
-	"encoding/xml"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -353,21 +354,26 @@ func update() {
 
 		// NOTE(simon): Dispatch all fetches.
 		beforeFetch := time.Now()
+		var wg sync.WaitGroup
 		responseCh := make(chan Fetch, len(config.Urls))
 		for _, url := range config.Urls {
+			wg.Add(1)
 			go func(url string) {
+				defer wg.Done()
 				feed, entries, err := feedFromUrl(url)
 				responseCh <- Fetch{feed, entries, err}
 			}(url)
 		}
+		wg.Wait()
+		close(responseCh)
+		log.Printf("\tDownloaded feeds: %s\n", time.Since(beforeFetch))
 
 		// NOTE(simon): Collect results and prepare database batch inserts.
+		beforeInserts := time.Now()
 		batch := &pgx.Batch{}
-		for range config.Urls {
-			fetch := <- responseCh
-
+		for fetch := range responseCh {
 			if fetch.err != nil {
-				log.Println(fetch.err)
+				log.Printf("\t%v\n", fetch.err)
 				continue
 			}
 
@@ -404,10 +410,8 @@ func update() {
 				batch.Queue(entryQuery, args)
 			}
 		}
-		log.Printf("\tDownloaded feeds: %s\n", time.Since(beforeFetch))
 
 		// NOTE(simon): Execute batch inserts.
-		beforeInserts := time.Now()
 		results := db.SendBatch(context.Background(), batch)
 		if err := results.Close(); err != nil {
 			fmt.Println(err)
