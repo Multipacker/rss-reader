@@ -4,6 +4,7 @@ package main
 // * Save the date something got imported into the database
 // * Server side search
 // * Pagination
+// * Use Etag with GET requests
 
 import (
 	"context"
@@ -420,6 +421,70 @@ func update() {
 	}
 }
 
+func createDatabase() {
+	// NOTE(simon): Ensure we have a version table with one entry in it
+	query := `
+		CREATE TABLE IF NOT EXISTS Version (
+			version INT NOT NULL PRIMARY KEY
+		);
+		INSERT INTO Version SELECT 0 WHERE NOT EXISTS (SELECT * FROM Version);
+	`
+	if _, err := db.Exec(context.Background(), query); err != nil {
+		log.Fatal(err)
+	}
+
+	// NOTE(simon): Query the current version.
+	var version int
+	query = `SELECT version FROM Version;`
+	if err := db.QueryRow(context.Background(), query).Scan(&version); err != nil {
+		log.Fatal(err)
+	}
+
+	for version != 1 {
+		tx, err := db.Begin(context.Background())
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer tx.Rollback(context.Background())
+
+		switch version {
+		case 0:
+			query = `
+				CREATE TABLE Feeds (
+					id          TEXT NOT NULL PRIMARY KEY,
+					title       TEXT NOT NULL,
+					description TEXT NOT NULL,
+					link        TEXT NOT NULL,
+					updated     TIMESTAMP WITH TIME ZONE NOT NULL
+				);
+				CREATE TABLE Entries (
+					id        TEXT NOT NULL,
+					feed      TEXT NOT NULL,
+					title     TEXT NOT NULL,
+					published TIMESTAMP WITH TIME ZONE NOT NULL,
+					updated   TIMESTAMP WITH TIME ZONE NOT NULL,
+					link      TEXT NOT NULL,
+					PRIMARY KEY (id, feed)
+				);
+			`
+
+			if _, err := db.Exec(context.Background(), query); err != nil {
+				log.Fatal(err)
+			}
+		}
+
+		version += 1
+		query = `UPDATE Version SET version = $1`
+		if _, err := db.Exec(context.Background(), query, version); err != nil {
+			log.Fatal(err)
+		}
+
+		if err := tx.Commit(context.Background()); err != nil {
+			log.Fatal(err)
+		}
+	}
+}
+
 func main() {
 	// NOTE(simon): Configure the logger to give more accurate timing information.
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
@@ -443,31 +508,7 @@ func main() {
 	}
 	defer db.Close()
 
-	// NOTE(simon): Create tables if they don't already exist
-	_, err = db.Exec(
-		context.Background(),
-		`
-		CREATE TABLE IF NOT EXISTS Feeds (
-			id          TEXT NOT NULL PRIMARY KEY,
-			title       TEXT NOT NULL,
-			description TEXT NOT NULL,
-			link        TEXT NOT NULL,
-			updated     TIMESTAMP WITH TIME ZONE NOT NULL
-		);
-		CREATE TABLE IF NOT EXISTS Entries (
-			id        TEXT NOT NULL,
-			feed      TEXT NOT NULL,
-			title     TEXT NOT NULL,
-			published TIMESTAMP WITH TIME ZONE NOT NULL,
-			updated   TIMESTAMP WITH TIME ZONE NOT NULL,
-			link      TEXT NOT NULL,
-			PRIMARY KEY (id, feed)
-		);
-		`,
-	)
-	if err != nil {
-		log.Fatalf("Failed to create tables: %v\n", err)
-	}
+	createDatabase()
 
 	// NOTE(simon): Start update routing in a separte goroutine.
 	go update()
