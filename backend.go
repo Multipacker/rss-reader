@@ -116,31 +116,25 @@ func handleFeeds(w http.ResponseWriter, request *http.Request) {
 
 	query := `SELECT * FROM Feeds;`
 	rows, err := db.Query(request.Context(), query)
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		log.Println(err)
-		return
+
+	var parsedRows []Feed
+	if err == nil {
+		parsedRows, err = pgx.CollectRows(rows, pgx.RowToStructByName[Feed])
 	}
 
-	parsedRows, err := pgx.CollectRows(rows, pgx.RowToStructByName[Feed])
-
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		log.Println(err)
-		return
+	var encoded []byte
+	if err == nil {
+		encoded, err = json.Marshal(parsedRows)
 	}
 
-	encoded, err := json.Marshal(parsedRows)
-
-	if err != nil {
+	if err == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write(encoded)
+	} else {
 		w.WriteHeader(http.StatusInternalServerError)
-		log.Println(err)
-		return
+		log.Printf("ERROR: %v\n", err)
 	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	w.Write(encoded)
 }
 
 func handleEntries(w http.ResponseWriter, request *http.Request) {
@@ -151,62 +145,74 @@ func handleEntries(w http.ResponseWriter, request *http.Request) {
 
 	query := `SELECT * FROM Entries ORDER BY published DESC;`
 	rows, err := db.Query(request.Context(), query)
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		log.Println(err)
-		return
+
+	var parsedRows []Entry
+	if err == nil {
+		parsedRows, err = pgx.CollectRows(rows, pgx.RowToStructByName[Entry])
 	}
 
-	parsedRows, err := pgx.CollectRows(rows, pgx.RowToStructByName[Entry])
-
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		log.Println(err)
-		return
+	var encoded []byte
+	if err == nil {
+		encoded, err = json.Marshal(parsedRows)
 	}
 
-	encoded, err := json.Marshal(parsedRows)
-
-	if err != nil {
+	if err == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write(encoded)
+	} else {
 		w.WriteHeader(http.StatusInternalServerError)
-		log.Println(err)
-		return
+		log.Printf("ERROR: %v\n", err)
 	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	w.Write(encoded)
 }
 
-func feedFromUrl(url string) (feed Feed, entries []Entry, err error) {
+func updateFeed(url string, etags []string) {
+	var err error
+
+	// NOTE(simon): Build request.
+	var request *http.Request
+	if err == nil {
+		request, err = http.NewRequest("GET", url, nil)
+	}
+	if err == nil {
+		for _, etag := range etags {
+			request.Header.Add("If-None-Match", etag)
+		}
+	}
+
 	var resp *http.Response
-	resp, err = http.Get(url)
-	if err != nil {
-		return
+	if err == nil {
+		resp, err = (&http.Client{}).Do(request)
 	}
 
 	var decoder *xml.Decoder
-	if resp.StatusCode == http.StatusOK {
-		decoder = xml.NewDecoder(resp.Body)
-	} else {
-		err = fmt.Errorf("Get %s: %s", url, resp.Status)
+	if err == nil {
+		if resp.StatusCode == http.StatusOK {
+			decoder = xml.NewDecoder(resp.Body)
+		} else if resp.StatusCode == http.StatusNotModified {
+			log.Printf("INFO: %v is already up to date\n", url)
+			return
+		} else {
+			err = fmt.Errorf("Get %s: %s", url, resp.Status)
+		}
 	}
 
 	// NOTE(simon): Find the first start element to determine the kind of feed we have.
 	var startToken xml.StartElement
-	for startToken.Name.Local == "" && err == nil {
+	for err == nil && startToken.Name.Local == "" {
 		var token xml.Token
 		token, err = decoder.Token()
 
-		if err != nil {
-			break
-		}
-
-		switch token := token.(type) {
-		case xml.StartElement:
-			startToken = token
+		if err == nil {
+			switch token := token.(type) {
+			case xml.StartElement:
+				startToken = token
+			}
 		}
 	}
+
+	var feed    Feed
+	var entries []Entry
 
 	switch startToken.Name.Local {
 	case "rss":
