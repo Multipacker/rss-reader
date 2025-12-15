@@ -4,7 +4,6 @@ package main
 // * Save the date something got imported into the database
 // * Server side search
 // * Pagination
-// * Use Etag with GET requests
 
 import (
 	"context"
@@ -349,9 +348,69 @@ func updateFeed(url string, etags []string) {
 			err = fmt.Errorf("Unknown feed type \"%v\"\n", startToken.Name.Local)
 		}
 	}
-
 	resp.Body.Close()
-	return
+
+	// NOTE(simon): Update database.
+	if err == nil {
+		batch := &pgx.Batch{}
+		feedQuery := `
+			INSERT INTO Feeds VALUES (@id, @title, @description, @link, @updated)
+			ON CONFLICT (id) DO
+			UPDATE SET title = @title, description = @description, link = @link, updated = @updated
+			WHERE Feeds.updated < @updated;
+		`
+		args := pgx.NamedArgs{
+			"id":          feed.Id,
+			"title":       feed.Title,
+			"description": feed.Description,
+			"link":        feed.Link,
+			"updated":     feed.Updated,
+		}
+		batch.Queue(feedQuery, args)
+
+		for _, entry := range entries {
+			entryQuery := `
+				INSERT INTO Entries VALUES (@id, @feed, @title, @published, @updated, @link)
+				ON CONFLICT (id, feed) DO
+				UPDATE SET title = @title, updated = @updated, link = @link
+				WHERE Entries.updated < @updated;
+			`
+			args := pgx.NamedArgs{
+				"id":        entry.Id,
+				"feed":      entry.Feed,
+				"title":     entry.Title,
+				"published": entry.Published,
+				"updated":   entry.Updated,
+				"link":      entry.Link,
+			}
+			batch.Queue(entryQuery, args)
+		}
+
+		// NOTE(simon): Update etags
+		newEtags := resp.Header["Etag"]
+		if len(newEtags) != 0 {
+			batch.Queue("DELETE FROM Etags WHERE feed = $1", feed.Id)
+		}
+		for _, etag := range newEtags {
+			etagQuery := `
+				INSERT INTO Etags VALUES (@feed, @etag) ON CONFLICT DO NOTHING
+			`
+			args := pgx.NamedArgs{
+				"feed": feed.Id,
+				"etag": etag,
+			}
+			batch.Queue(etagQuery, args)
+		}
+
+		// NOTE(simon): Execute batch inserts.
+		results := db.SendBatch(context.Background(), batch)
+		err = results.Close()
+	}
+
+	// NOTE(simon): Common logging.
+	if err != nil {
+		log.Printf("ERROR: %v\n", err)
+	}
 }
 
 func update() {
@@ -359,79 +418,38 @@ func update() {
 	updateFeedsTick := time.Tick(updateDuration)
 
 	for ; ; <- updateFeedsTick {
-		type Fetch struct {
-			feed    Feed
-			entries []Entry
-			err     error
+		log.Println("INFO: Updating feeds")
+		beforeUpdate := time.Now()
+
+		// NOTE(simon): Gather etags and links.
+		links := make(map[string][]string)
+		query := `SELECT link, COALESCE(etag, '') FROM Feeds LEFT OUTER JOIN Etags ON id = feed`
+		rows, err := db.Query(context.Background(), query)
+		if err == nil {
+			var link, etag string
+			_, err = pgx.ForEachRow(rows, []any{&link, &etag}, func() error {
+				etags := links[link]
+				etags = append(etags, etag)
+				links[link] = etags
+				return nil
+			})
+		}
+		if err != nil {
+			log.Printf("ERROR: %v\n", err)
 		}
 
-		log.Println("Updating feeds")
-
-		// NOTE(simon): Dispatch all fetches.
-		beforeFetch := time.Now()
+		// NOTE(simon): Dispatch all updates.
 		var wg sync.WaitGroup
-		responseCh := make(chan Fetch, len(config.Urls))
-		for _, url := range config.Urls {
+		for url, etags := range links {
 			wg.Add(1)
-			go func(url string) {
+			go func(url string, etags []string) {
 				defer wg.Done()
-				feed, entries, err := feedFromUrl(url)
-				responseCh <- Fetch{feed, entries, err}
-			}(url)
+				updateFeed(url, etags)
+			}(url, etags)
 		}
+
 		wg.Wait()
-		close(responseCh)
-		log.Printf("\tDownloaded feeds: %s\n", time.Since(beforeFetch))
-
-		// NOTE(simon): Collect results and prepare database batch inserts.
-		beforeInserts := time.Now()
-		batch := &pgx.Batch{}
-		for fetch := range responseCh {
-			if fetch.err != nil {
-				log.Printf("\t%v\n", fetch.err)
-				continue
-			}
-
-			feedQuery := `
-				INSERT INTO Feeds VALUES (@id, @title, @description, @link, @updated)
-				ON CONFLICT (id) DO
-				UPDATE SET title = @title, description = @description, link = @link, updated = @updated
-				WHERE Feeds.updated < @updated;
-			`
-			args := pgx.NamedArgs{
-				"id":          fetch.feed.Id,
-				"title":       fetch.feed.Title,
-				"description": fetch.feed.Description,
-				"link":        fetch.feed.Link,
-				"updated":     fetch.feed.Updated,
-			}
-			batch.Queue(feedQuery, args)
-
-			for _, entry := range fetch.entries {
-				entryQuery := `
-					INSERT INTO Entries VALUES (@id, @feed, @title, @published, @updated, @link)
-					ON CONFLICT (id, feed) DO
-					UPDATE SET title = @title, updated = @updated, link = @link
-					WHERE Entries.updated < @updated;
-				`
-				args := pgx.NamedArgs{
-					"id":        entry.Id,
-					"feed":      entry.Feed,
-					"title":     entry.Title,
-					"published": entry.Published,
-					"updated":   entry.Updated,
-					"link":      entry.Link,
-				}
-				batch.Queue(entryQuery, args)
-			}
-		}
-
-		// NOTE(simon): Execute batch inserts.
-		results := db.SendBatch(context.Background(), batch)
-		if err := results.Close(); err != nil {
-			fmt.Println(err)
-		}
-		log.Printf("\tUpdated store: %s\n", time.Since(beforeInserts))
+		log.Printf("INFO: Feed updated finished: %s\n", time.Since(beforeUpdate))
 	}
 }
 
@@ -480,6 +498,11 @@ func createDatabase() {
 					link      TEXT NOT NULL,
 					PRIMARY KEY (id, feed)
 				);
+				CREATE TABLE Etags (
+					feed TEXT NOT NULL REFERENCES Feeds(id),
+					etag TEXT NOT NULL,
+					PRIMARY KEY (feed, etag)
+				)
 			`
 
 			if _, err := db.Exec(context.Background(), query); err != nil {
@@ -524,6 +547,11 @@ func main() {
 
 	createDatabase()
 
+	// NOTE(simon): Fetch initial feeds
+	for _, link := range config.Urls {
+		go updateFeed(link, []string{})
+	}
+
 	// NOTE(simon): Start update routing in a separte goroutine.
 	go update()
 
@@ -545,7 +573,7 @@ func main() {
 	http.HandleFunc("/entries", handleEntries)
 
 	// NOTE(simon): Start the server with the configured address and the handlers configured above.
-	log.Printf("Serving on http://%s", address)
+	log.Printf("INFO: Serving on http://%s", address)
 	if err := http.ListenAndServe(address, nil); err != nil {
 		log.Fatal(err)
 	}
