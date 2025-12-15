@@ -56,27 +56,25 @@ func parseRssDateOrNow(raw string) time.Time {
 	}
 
 	// NOTE(simon): Try to parse a few common date formats.
-	parsed, err := time.Parse("02 Jan 2006 15:04:05 MST", raw)
-	if err == nil {
-		return parsed
+	formats := []string{
+		"02 Jan 2006 15:04:05 MST",
+		"02 Jan 2006 15:04:05 -0700",
+		"02 Jan 06 15:04:05 MST",
+		"02 Jan 06 15:04:05 -0700",
 	}
 
-	parsed, err = time.Parse("02 Jan 2006 15:04:05 -0700", raw)
-	if err == nil {
-		return parsed
+	for _, format := range formats {
+		parsed, err := time.Parse(format, raw)
+		if err != nil {
+			continue
+		}
+
+		if parsed.Before(time.Now()) {
+			return parsed
+		}
 	}
 
-	parsed, err = time.Parse("02 Jan 06 15:04:05 MST", raw)
-	if err == nil {
-		return parsed
-	}
-
-	parsed, err = time.Parse("02 Jan 06 15:04:05 -0700", raw)
-	if err == nil {
-		return parsed
-	}
-
-	log.Printf("Failed to parse \"%v\" as a RSS date", raw)
+	log.Printf("ERROR: Failed to parse \"%v\" as a RSS date", raw)
 
 	return time.Now()
 }
@@ -87,12 +85,22 @@ func parseAtomDateOrNow(raw string) time.Time {
 		return time.Now()
 	}
 
-	parsed, err := time.Parse(time.RFC3339, raw)
-	if err == nil {
-		return parsed
+	formats := []string{
+		time.RFC3339,
 	}
 
-	log.Printf("Failed to parse \"%v\" as an Atom date", raw)
+	for _, format := range formats {
+		parsed, err := time.Parse(format, raw)
+		if err != nil {
+			continue
+		}
+
+		if parsed.Before(time.Now()) {
+			return parsed
+		}
+	}
+
+	log.Printf("ERROR: Failed to parse \"%v\" as an Atom date", raw)
 
 	return time.Now()
 }
