@@ -418,10 +418,9 @@ func updateFeed(url string, etags []string, updated time.Time) {
 }
 
 func update() {
-	var updateDuration time.Duration = 24 * 60 * 60 * 1000 * 1000 * 1000
-	updateFeedsTick := time.Tick(updateDuration)
+	updateFeedsTick := time.Tick(24 * time.Hour)
 
-	for ; ; <- updateFeedsTick {
+	for range updateFeedsTick {
 		log.Println("INFO: Updating feeds")
 		beforeUpdate := time.Now()
 
@@ -535,6 +534,7 @@ func main() {
 	createDatabase()
 
 	// NOTE(simon): Fetch initial feeds
+	log.Println("Fetching feeds from config")
 	for _, link := range config.Urls {
 		go updateFeed(link, []string{}, time.Unix(0, 0))
 	}
