@@ -13,9 +13,11 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -165,7 +167,7 @@ func handleEntries(w http.ResponseWriter, request *http.Request) {
 	}
 }
 
-func updateFeed(url string, etags []string) {
+func updateFeed(url string, etags []string, updated time.Time) {
 	var err error
 
 	// NOTE(simon): Build request.
@@ -174,6 +176,7 @@ func updateFeed(url string, etags []string) {
 		request, err = http.NewRequest("GET", url, nil)
 	}
 	if err == nil {
+		request.Header.Add("If-Modified-Since", updated.UTC().Format("Mon, 02 Jan 2006 15:04:05 GMT"))
 		for _, etag := range etags {
 			request.Header.Add("If-None-Match", etag)
 		}
@@ -422,15 +425,21 @@ func update() {
 		beforeUpdate := time.Now()
 
 		// NOTE(simon): Gather etags and links.
-		links := make(map[string][]string)
-		query := `SELECT link, COALESCE(etag, '') FROM Feeds LEFT OUTER JOIN Etags ON id = feed`
+		type FeedMeta struct {
+			etags   []string
+			updated time.Time
+		}
+		links := make(map[string]FeedMeta)
+		query := `SELECT link, COALESCE(etag, ''), updated FROM Feeds LEFT OUTER JOIN Etags ON id = feed`
 		rows, err := db.Query(context.Background(), query)
 		if err == nil {
 			var link, etag string
-			_, err = pgx.ForEachRow(rows, []any{&link, &etag}, func() error {
-				etags := links[link]
-				etags = append(etags, etag)
-				links[link] = etags
+			var updated time.Time
+			_, err = pgx.ForEachRow(rows, []any{&link, &etag, &updated}, func() error {
+				meta := links[link]
+				meta.etags = append(meta.etags, etag)
+				meta.updated = updated
+				links[link] = meta
 				return nil
 			})
 		}
@@ -440,12 +449,12 @@ func update() {
 
 		// NOTE(simon): Dispatch all updates.
 		var wg sync.WaitGroup
-		for url, etags := range links {
+		for url, meta := range links {
 			wg.Add(1)
-			go func(url string, etags []string) {
+			go func(url string, meta FeedMeta) {
 				defer wg.Done()
-				updateFeed(url, etags)
-			}(url, etags)
+				updateFeed(url, meta.etags, meta.updated)
+			}(url, meta)
 		}
 
 		wg.Wait()
@@ -549,7 +558,7 @@ func main() {
 
 	// NOTE(simon): Fetch initial feeds
 	for _, link := range config.Urls {
-		go updateFeed(link, []string{})
+		go updateFeed(link, []string{}, time.Unix(0, 0))
 	}
 
 	// NOTE(simon): Start update routing in a separte goroutine.
