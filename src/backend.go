@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"encoding/xml"
+	_ "embed"
 	"fmt"
 	"log"
 	"net/http"
@@ -462,13 +463,16 @@ func update() {
 	}
 }
 
+//go:embed init.sql
+var dbSqlInit string
+
 func createDatabase() {
 	// NOTE(simon): Ensure we have a version table with one entry in it
 	query := `
-		CREATE TABLE IF NOT EXISTS Version (
+		CREATE TABLE IF NOT EXISTS Meta (
 			version INT NOT NULL PRIMARY KEY
 		);
-		INSERT INTO Version SELECT 0 WHERE NOT EXISTS (SELECT * FROM Version);
+		INSERT INTO Meta(version) (SELECT -1 WHERE NOT EXISTS (SELECT * FROM Meta));
 	`
 	if _, err := db.Exec(context.Background(), query); err != nil {
 		log.Fatal(err)
@@ -476,52 +480,26 @@ func createDatabase() {
 
 	// NOTE(simon): Query the current version.
 	var version int
-	query = `SELECT version FROM Version;`
-	if err := db.QueryRow(context.Background(), query).Scan(&version); err != nil {
+	if err := db.QueryRow(context.Background(), "SELECT version FROM Meta").Scan(&version); err != nil {
 		log.Fatal(err)
 	}
 
-	for version != 1 {
+	migrations := []string{
+		dbSqlInit,
+	}
+
+	for i, migration := range migrations[version + 1:] {
 		tx, err := db.Begin(context.Background())
 		if err != nil {
 			log.Fatal(err)
 		}
 		defer tx.Rollback(context.Background())
 
-		switch version {
-		case 0:
-			query = `
-				CREATE TABLE Feeds (
-					id          TEXT NOT NULL PRIMARY KEY,
-					title       TEXT NOT NULL,
-					description TEXT NOT NULL,
-					link        TEXT NOT NULL,
-					updated     TIMESTAMP WITH TIME ZONE NOT NULL
-				);
-				CREATE TABLE Entries (
-					id        TEXT NOT NULL,
-					feed      TEXT NOT NULL,
-					title     TEXT NOT NULL,
-					published TIMESTAMP WITH TIME ZONE NOT NULL,
-					updated   TIMESTAMP WITH TIME ZONE NOT NULL,
-					link      TEXT NOT NULL,
-					PRIMARY KEY (id, feed)
-				);
-				CREATE TABLE Etags (
-					feed TEXT NOT NULL REFERENCES Feeds(id),
-					etag TEXT NOT NULL,
-					PRIMARY KEY (feed, etag)
-				)
-			`
-
-			if _, err := db.Exec(context.Background(), query); err != nil {
-				log.Fatal(err)
-			}
+		if _, err := db.Exec(context.Background(), migration); err != nil {
+			log.Fatal(err)
 		}
 
-		version += 1
-		query = `UPDATE Version SET version = $1`
-		if _, err := db.Exec(context.Background(), query, version); err != nil {
+		if _, err := db.Exec(context.Background(), "UPDATE Meta SET version = $1", version + 1 + i); err != nil {
 			log.Fatal(err)
 		}
 
