@@ -63,6 +63,10 @@ func parseRssDateOrNow(raw string) time.Time {
 		"02 Jan 2006 15:04:05 -0700",
 		"02 Jan 06 15:04:05 MST",
 		"02 Jan 06 15:04:05 -0700",
+		"2 Jan 2006 15:04:05 MST",
+		"2 Jan 2006 15:04:05 -0700",
+		"2 Jan 06 15:04:05 MST",
+		"2 Jan 06 15:04:05 -0700",
 	}
 
 	for _, format := range formats {
