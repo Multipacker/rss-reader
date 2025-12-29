@@ -1,3 +1,5 @@
+/* Colors */
+
 :root {
     --oc-gray0: #f8f9faff;
     --oc-gray1: #f1f3f5ff;
@@ -12,6 +14,8 @@
 
     --oc-orange6: #fd7e14ff;
 }
+
+/* Prefered schemes */
 
 @media (prefers-color-scheme: light) {
     :root {
@@ -41,6 +45,18 @@
     }
 }
 
+
+
+/* General settings */
+
+html {
+    box-sizing: border-box;
+}
+
+*, *::before, *::after {
+    box-sizing: inherit;
+}
+
 body {
     font-size: 16pt;
     font-family: sans-serif;
@@ -64,6 +80,10 @@ main {
     background: var(--selection-color);
 }
 
+::placeholder {
+    color: var(--weak-text-color);
+}
+
 mark {
     background-color: color-mix(in srgb, var(--focus-color) 50%, transparent);
     color: inherit;
@@ -74,28 +94,42 @@ input:hover, select:hover, button:hover {
 }
 
 input, select, button {
-    font: inherit;
+    font-family: inherit;
+    font-size: 100%;
     color: inherit;
+    padding: 0px 5px 0px 5px;
+    margin: 0;
     background-color: var(--button-background-color);
-    border: 2px solid var(--button-border-color);
+    border: 1px solid var(--button-border-color);
     transition: background-color 0.3s;
 }
 
-input::placeholder {
-    color: var(--weak-text-color);
+
+
+/* Specifics */
+
+#results {
+    border: 1px solid var(--base-border-color);
+    list-style: none;
+    overflow-y: scroll;
+    margin: 0;
+    padding: 0;
+    flex: 1;
+}
+
+#results::after {
+    content: "";
+    display: inline-block;
+    height: 100%;
 }
 
 .item {
-    display: flex;
-    flex-direction: row;
-    justify-content: space-between;
-    border: 2px solid var(--base-border-color);
+    border: 1px solid var(--base-border-color);
     padding: 10px;
 }
 
 .item a {
     color: inherit;
-    outline: none;
 }
 
 .item.read a {

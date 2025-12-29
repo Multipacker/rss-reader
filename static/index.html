@@ -10,25 +10,28 @@
         <link rel="icon" href="favicon.svg" />
     </head>
     <body style="margin: 0;">
-        <template id="template">
-            <div class="item"><div><a class="item-link"></a><p class="item-description"></p></div></div>
+        <template id="item-template">
+            <li class="item">
+                <a class="item-link"></a>
+                <p class="item-description"></p>
+            </li>
         </template>
         <main style="display: flex; flex-direction: column;">
             <h1 style="text-align: center;">RSS Feed</h1>
-            <div style="display: flex; flex-wrap: wrap; justify-content: center;">
+
+            <select id="search_type" oninput="update_list();">
+                <option>Articles</option>
+                <option>Feeds</option>
+            </select>
+            <div style="display: flex;">
                 <select id="search_filter" oninput="update_list();">
                     <option>All</option>
                     <option>Read</option>
                     <option>Unread</option>
                 </select>
-                <select id="search_type" oninput="update_list();">
-                    <option>Articles</option>
-                    <option>Feeds</option>
-                </select>
                 <input id="search" placeholder="Search..." type="search" style="flex: 1;" oninput="update_list();"></input>
             </div>
-            <div id="results" style="overflow-y: scroll; flex: 1;">
-            </div>
+            <ul id="results"></ul>
         </main>
     </body>
 </html>
