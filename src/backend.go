@@ -194,6 +194,8 @@ func updateFeed(url string, etags []string, updated time.Time) {
 
 	var decoder *xml.Decoder
 	if err == nil {
+		defer resp.Body.Close()
+
 		if resp.StatusCode == http.StatusOK {
 			decoder = xml.NewDecoder(resp.Body)
 		} else if resp.StatusCode == http.StatusNotModified {
@@ -356,7 +358,6 @@ func updateFeed(url string, etags []string, updated time.Time) {
 			err = fmt.Errorf("Unknown feed type \"%v\"\n", startToken.Name.Local)
 		}
 	}
-	resp.Body.Close()
 
 	// NOTE(simon): Update database.
 	if err == nil {
