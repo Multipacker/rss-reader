@@ -1,34 +1,38 @@
 let feeds = new Map();
 let entries = [];
+let read_articles = new Set();
 
-// NOTE(simon): Load and unpack feeds and entries, then update the results list.
-fetch("feeds")
-    .then(response => response.json())
-    .then(rawFeeds => {
-        rawFeeds.forEach(rawFeed => {
-            const feed = {
-                title:       rawFeed.title,
-                description: rawFeed.description,
-                link:        rawFeed.link,
-                updated:     new Date(rawFeed.updated),
-            };
+window.onload = async () => {
+    read_articles = new Set(JSON.parse(localStorage.getItem("read_articles")));
 
-            feeds.set(rawFeed.id, feed);
+    // NOTE(simon): Load and unpack feeds and entries.
+    await fetch("feeds")
+        .then(response => response.json())
+        .then(rawFeeds => {
+            rawFeeds.forEach(rawFeed => {
+                const feed = {
+                    title:       rawFeed.title,
+                    description: rawFeed.description,
+                    link:        rawFeed.link,
+                    updated:     new Date(rawFeed.updated),
+                };
+
+                feeds.set(rawFeed.id, feed);
+            });
         });
-    });
-fetch("entries")
-    .then(response => response.json())
-    .then(rawEntries => {
-        entries = rawEntries.flatMap(rawEntry => {
-            const entry = { ...rawEntry };
-            entry.published = new Date(entry.published);
-            entry.update    = new Date(entry.update);
-            return entry;
+    await fetch("entries")
+        .then(response => response.json())
+        .then(rawEntries => {
+            entries = rawEntries.flatMap(rawEntry => {
+                const entry = { ...rawEntry };
+                entry.published = new Date(entry.published);
+                entry.update    = new Date(entry.update);
+                return entry;
+            });
         });
-    })
-    .then(() => update_list());
 
-const read_articles = new Set(JSON.parse(localStorage.getItem("read_articles")));
+    update_list();
+};
 
 const save_read = (id) => {
     read_articles.add(id);
@@ -54,6 +58,7 @@ const update_list = () => {
     const search_type   = document.getElementById("search_type");
     const search        = document.getElementById("search");
     const result_list   = document.getElementById("results");
+    const template      = document.getElementById("item-template");
 
     // NOTE(simon): Construct queries.
     const search_terms = search.value
@@ -67,9 +72,6 @@ const update_list = () => {
         ")",
         "i"
     );
-
-    // NOTE(simon): Fetch the item template.
-    const template = document.getElementById("template");
 
     // NOTE(simon): Collect diplay information.
     let displayItems = [];
