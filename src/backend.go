@@ -398,11 +398,11 @@ func updateFeed(url string, etags []string, updated time.Time) {
 		// NOTE(simon): Update etags
 		newEtags := resp.Header["Etag"]
 		if len(newEtags) != 0 {
-			batch.Queue("DELETE FROM Etags WHERE feed = $1", feed.Id)
+			batch.Queue("DELETE FROM FeedEtags WHERE feed = $1", feed.Id)
 		}
 		for _, etag := range newEtags {
 			etagQuery := `
-				INSERT INTO Etags VALUES (@feed, @etag) ON CONFLICT DO NOTHING
+				INSERT INTO FeedEtags VALUES (@feed, @etag) ON CONFLICT DO NOTHING
 			`
 			args := pgx.NamedArgs{
 				"feed": feed.Id,
@@ -435,7 +435,7 @@ func update() {
 			updated time.Time
 		}
 		links := make(map[string]FeedMeta)
-		query := `SELECT link, COALESCE(etag, ''), updated FROM Feeds LEFT OUTER JOIN Etags ON id = feed`
+		query := `SELECT link, COALESCE(etag, ''), updated FROM Feeds LEFT OUTER JOIN FeedEtags ON id = feed`
 		rows, err := db.Query(context.Background(), query)
 		if err == nil {
 			var link, etag string

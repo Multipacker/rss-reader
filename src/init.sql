@@ -16,7 +16,7 @@ CREATE TABLE Entries (
     PRIMARY KEY (id, feed)
 );
 
-CREATE TABLE Etags (
+CREATE TABLE FeedEtags (
     feed TEXT NOT NULL REFERENCES Feeds(id),
     etag TEXT NOT NULL,
     PRIMARY KEY (feed, etag)
