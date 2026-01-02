@@ -179,7 +179,9 @@ func updateFeed(url string, etags []string, updated time.Time) {
 		request, err = http.NewRequest("GET", url, nil)
 	}
 	if err == nil {
-		request.Header.Add("If-Modified-Since", updated.UTC().Format("Mon, 02 Jan 2006 15:04:05 GMT"))
+		if !updated.IsZero() {
+			request.Header.Add("If-Modified-Since", updated.UTC().Format("Mon, 02 Jan 2006 15:04:05 GMT"))
+		}
 		for _, etag := range etags {
 			request.Header.Add("If-None-Match", etag)
 		}
@@ -539,7 +541,7 @@ func main() {
 	// NOTE(simon): Fetch initial feeds
 	log.Println("Fetching feeds from config")
 	for _, link := range config.Urls {
-		go updateFeed(link, []string{}, time.Unix(0, 0))
+		go updateFeed(link, []string{}, time.Time{})
 	}
 
 	// NOTE(simon): Start update routing in a separte goroutine.
