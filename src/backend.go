@@ -118,7 +118,7 @@ func handleFeeds(w http.ResponseWriter, request *http.Request) {
 		return
 	}
 
-	query := `SELECT * FROM Feeds;`
+	query := `SELECT id, title, description, link, updated FROM Feeds;`
 	rows, err := db.Query(request.Context(), query)
 
 	var parsedRows []Feed
