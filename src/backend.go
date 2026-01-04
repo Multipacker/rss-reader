@@ -170,7 +170,7 @@ func handleEntries(w http.ResponseWriter, request *http.Request) {
 	}
 }
 
-func updateFeed(url string, etags []string, updated time.Time) {
+func updateFeed(url string, etag string, updated time.Time) {
 	var err error
 
 	// NOTE(simon): Build request.
@@ -182,7 +182,7 @@ func updateFeed(url string, etags []string, updated time.Time) {
 		if !updated.IsZero() {
 			request.Header.Add("If-Modified-Since", updated.UTC().Format("Mon, 02 Jan 2006 15:04:05 GMT"))
 		}
-		for _, etag := range etags {
+		if len(etag) > 0 {
 			request.Header.Add("If-None-Match", etag)
 		}
 	}
@@ -190,6 +190,14 @@ func updateFeed(url string, etags []string, updated time.Time) {
 	var resp *http.Response
 	if err == nil {
 		resp, err = (&http.Client{}).Do(request)
+	}
+
+	// NOTE(simon): Get etag
+	var newEtag string
+	if httpEtag := resp.Header["Etag"]; len(httpEtag) >= 1 {
+		// NOTE(simon): There might be multiple items due to the interface, but
+		// the HTTP spec only allows one, so we use the first one.
+		newEtag = httpEtag[0]
 	}
 
 	var decoder *xml.Decoder
@@ -363,9 +371,9 @@ func updateFeed(url string, etags []string, updated time.Time) {
 	if err == nil {
 		batch := &pgx.Batch{}
 		feedQuery := `
-			INSERT INTO Feeds VALUES (@id, @title, @description, @link, @updated)
+			INSERT INTO Feeds VALUES (@id, @title, @description, @link, @updated, @etag)
 			ON CONFLICT (id) DO
-			UPDATE SET title = @title, description = @description, link = @link, updated = @updated
+			UPDATE SET title = @title, description = @description, link = @link, updated = @updated, etag = @etag
 			WHERE Feeds.updated < @updated;
 		`
 		args := pgx.NamedArgs{
@@ -374,6 +382,7 @@ func updateFeed(url string, etags []string, updated time.Time) {
 			"description": feed.Description,
 			"link":        feed.Link,
 			"updated":     feed.Updated,
+			"etag":        newEtag,
 		}
 		batch.Queue(feedQuery, args)
 
@@ -395,22 +404,6 @@ func updateFeed(url string, etags []string, updated time.Time) {
 			batch.Queue(entryQuery, args)
 		}
 
-		// NOTE(simon): Update etags
-		newEtags := resp.Header["Etag"]
-		if len(newEtags) != 0 {
-			batch.Queue("DELETE FROM FeedEtags WHERE feed = $1", feed.Id)
-		}
-		for _, etag := range newEtags {
-			etagQuery := `
-				INSERT INTO FeedEtags VALUES (@feed, @etag) ON CONFLICT DO NOTHING
-			`
-			args := pgx.NamedArgs{
-				"feed": feed.Id,
-				"etag": etag,
-			}
-			batch.Queue(etagQuery, args)
-		}
-
 		// NOTE(simon): Execute batch inserts.
 		results := db.SendBatch(context.Background(), batch)
 		err = results.Close()
@@ -429,37 +422,32 @@ func update() {
 		log.Println("INFO: Updating feeds")
 		beforeUpdate := time.Now()
 
-		// NOTE(simon): Gather etags and links.
+		// NOTE(simon): Gather feeds and http metadata
 		type FeedMeta struct {
-			etags   []string
+			link    string
+			etag    string
 			updated time.Time
 		}
-		links := make(map[string]FeedMeta)
-		query := `SELECT link, COALESCE(etag, ''), updated FROM Feeds LEFT OUTER JOIN FeedEtags ON id = feed`
-		rows, err := db.Query(context.Background(), query)
+
+		rows, err := db.Query(context.Background(), `SELECT link, etag, updated FROM Feeds`)
+
+		var metas []FeedMeta
 		if err == nil {
-			var link, etag string
-			var updated time.Time
-			_, err = pgx.ForEachRow(rows, []any{&link, &etag, &updated}, func() error {
-				meta := links[link]
-				meta.etags = append(meta.etags, etag)
-				meta.updated = updated
-				links[link] = meta
-				return nil
-			})
+			metas, err = pgx.CollectRows(rows, pgx.RowToStructByName[FeedMeta])
 		}
+
 		if err != nil {
 			log.Printf("ERROR: %v\n", err)
 		}
 
 		// NOTE(simon): Dispatch all updates.
 		var wg sync.WaitGroup
-		for url, meta := range links {
+		for _, meta := range metas {
 			wg.Add(1)
-			go func(url string, meta FeedMeta) {
+			go func(meta FeedMeta) {
 				defer wg.Done()
-				updateFeed(url, meta.etags, meta.updated)
-			}(url, meta)
+				updateFeed(meta.link, meta.etag, meta.updated)
+			}(meta)
 		}
 
 		wg.Wait()
@@ -541,7 +529,7 @@ func main() {
 	// NOTE(simon): Fetch initial feeds
 	log.Println("Fetching feeds from config")
 	for _, link := range config.Urls {
-		go updateFeed(link, []string{}, time.Time{})
+		go updateFeed(link, "", time.Time{})
 	}
 
 	// NOTE(simon): Start update routing in a separte goroutine.
