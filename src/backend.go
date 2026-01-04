@@ -529,6 +529,13 @@ func createDatabase() {
 	}
 }
 
+func middlewareLogging(logger *log.Logger, next http.Handler) http.Handler {
+	return http.HandlerFunc(func (w http.ResponseWriter, r *http.Request) {
+		logger.Printf("\"%v %v %v\" \"%v\" %v\n", r.Method, r.URL.Path, r.Proto, r.UserAgent(), r.RemoteAddr)
+		next.ServeHTTP(w, r)
+	})
+}
+
 func main() {
 	// NOTE(simon): Configure the logger to give more accurate timing information.
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
@@ -582,7 +589,7 @@ func main() {
 
 	// NOTE(simon): Start the server with the configured address and the handlers configured above.
 	log.Printf("INFO: Serving on http://%s", address)
-	if err := http.ListenAndServe(address, nil); err != nil {
+	if err := http.ListenAndServe(address, middlewareLogging(log.Default(), http.DefaultServeMux)); err != nil {
 		log.Fatal(err)
 	}
 }
