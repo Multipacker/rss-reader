@@ -170,7 +170,7 @@ func handleEntries(w http.ResponseWriter, request *http.Request) {
 	}
 }
 
-func updateFeed(url string, etag string, updated time.Time) {
+func updateFeed(url string, etag string, lastModified time.Time) {
 	var err error
 
 	// NOTE(simon): Build request.
@@ -179,8 +179,8 @@ func updateFeed(url string, etag string, updated time.Time) {
 		request, err = http.NewRequest("GET", url, nil)
 	}
 	if err == nil {
-		if !updated.IsZero() {
-			request.Header.Add("If-Modified-Since", updated.UTC().Format("Mon, 02 Jan 2006 15:04:05 GMT"))
+		if !lastModified.IsZero() {
+			request.Header.Add("If-Modified-Since", lastModified.UTC().Format("Mon, 02 Jan 2006 15:04:05 GMT"))
 		}
 		if len(etag) > 0 {
 			request.Header.Add("If-None-Match", etag)
@@ -192,14 +192,6 @@ func updateFeed(url string, etag string, updated time.Time) {
 		resp, err = (&http.Client{}).Do(request)
 	}
 
-	// NOTE(simon): Get etag
-	var newEtag string
-	if httpEtag := resp.Header["Etag"]; len(httpEtag) >= 1 {
-		// NOTE(simon): There might be multiple items due to the interface, but
-		// the HTTP spec only allows one, so we use the first one.
-		newEtag = httpEtag[0]
-	}
-
 	var decoder *xml.Decoder
 	if err == nil {
 		defer resp.Body.Close()
@@ -207,10 +199,45 @@ func updateFeed(url string, etag string, updated time.Time) {
 		if resp.StatusCode == http.StatusOK {
 			decoder = xml.NewDecoder(resp.Body)
 		} else if resp.StatusCode == http.StatusNotModified {
-			log.Printf("INFO: %v is already up to date\n", url)
+			log.Printf("INFO %v: Already up to date\n", url)
 			return
 		} else {
-			err = fmt.Errorf("Get %s: %s", url, resp.Status)
+			err = fmt.Errorf("GET %s", resp.Status)
+		}
+	}
+
+	// NOTE(simon): Get headers
+	var newEtag string
+	var newLastModified time.Time
+	if err == nil {
+		// NOTE(simon): Get Etag header
+		if httpEtag := resp.Header["Etag"]; len(httpEtag) > 0 {
+			// NOTE(simon): There might be multiple items due to the interface, but
+			// the HTTP spec only allows one, so we use the first one.
+			newEtag = httpEtag[0]
+		}
+
+		// NOTE(simon): Get Last-Modifed header
+		if httpLastModified := resp.Header["Last-Modified"]; len(httpLastModified) > 0 {
+			// NOTE(simon): There might be multiple items due to the interface, but
+			// the HTTP spec only allows one, so we use the first one.
+			httpLastModified := httpLastModified[0]
+
+			formats := []string{
+				time.RFC1123,                   // From HTTP spec
+				"Mon, 2 Jan 2006 15:04:05 MST", // Some don't zero-pad the days
+			}
+
+			for _, format := range formats {
+				if parsed, err := time.Parse(format, httpLastModified); err == nil {
+					newLastModified = parsed
+					break
+				}
+			}
+
+			if newLastModified.IsZero() {
+				log.Printf("ERROR %v: Failed to parse Last-Modified header '%v', ignoring\n", url, httpLastModified)
+			}
 		}
 	}
 
@@ -371,18 +398,19 @@ func updateFeed(url string, etag string, updated time.Time) {
 	if err == nil {
 		batch := &pgx.Batch{}
 		feedQuery := `
-			INSERT INTO Feeds VALUES (@id, @title, @description, @link, @updated, @etag)
+			INSERT INTO Feeds VALUES (@id, @title, @description, @link, @updated, @etag, @lastModified)
 			ON CONFLICT (id) DO
-			UPDATE SET title = @title, description = @description, link = @link, updated = @updated, etag = @etag
+			UPDATE SET title = @title, description = @description, link = @link, updated = @updated, etag = @etag, lastModified = @lastModified
 			WHERE Feeds.updated < @updated;
 		`
 		args := pgx.NamedArgs{
-			"id":          feed.Id,
-			"title":       feed.Title,
-			"description": feed.Description,
-			"link":        feed.Link,
-			"updated":     feed.Updated,
-			"etag":        newEtag,
+			"id":           feed.Id,
+			"title":        feed.Title,
+			"description":  feed.Description,
+			"link":         feed.Link,
+			"updated":      feed.Updated,
+			"etag":         newEtag,
+			"lastModified": newLastModified,
 		}
 		batch.Queue(feedQuery, args)
 
@@ -411,7 +439,7 @@ func updateFeed(url string, etag string, updated time.Time) {
 
 	// NOTE(simon): Common logging.
 	if err != nil {
-		log.Printf("ERROR: %v\n", err)
+		log.Printf("ERROR %v: %v\n", url, err)
 	}
 }
 
@@ -424,12 +452,12 @@ func update() {
 
 		// NOTE(simon): Gather feeds and http metadata
 		type FeedMeta struct {
-			link    string
-			etag    string
-			updated time.Time
+			link         string
+			etag         string
+			lastModified time.Time
 		}
 
-		rows, err := db.Query(context.Background(), `SELECT link, etag, updated FROM Feeds`)
+		rows, err := db.Query(context.Background(), `SELECT link, etag, lastModified FROM Feeds`)
 
 		var metas []FeedMeta
 		if err == nil {
@@ -446,7 +474,7 @@ func update() {
 			wg.Add(1)
 			go func(meta FeedMeta) {
 				defer wg.Done()
-				updateFeed(meta.link, meta.etag, meta.updated)
+				updateFeed(meta.link, meta.etag, meta.lastModified)
 			}(meta)
 		}
 

@@ -7,7 +7,8 @@ CREATE TABLE Feeds (
     updated     TIMESTAMP WITH TIME ZONE NOT NULL,
 
     -- NOTE(simon): HTTP metadata
-    etag TEXT NOT NULL
+    etag         TEXT NOT NULL,
+    lastModified TIMESTAMP WITH TIME ZONE NOT NULL
 );
 
 CREATE TABLE Entries (
