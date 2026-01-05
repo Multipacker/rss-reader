@@ -1,10 +1,5 @@
 package main
 
-// TODO(simon): To-do list in order or execution
-// * Save the date something got imported into the database
-// * Server side search
-// * Pagination
-
 import (
 	"context"
 	"encoding/json"
