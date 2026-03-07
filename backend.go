@@ -55,11 +55,7 @@ func pollUrl(url string) (response *http.Response, changed bool, err error) {
 	}
 
 	// NOTE(simon): Has the content changed?
-	if response.StatusCode == http.StatusOK {
-		changed = true
-	} else if response.StatusCode == http.StatusNotModified {
-		changed = false
-	}
+	changed = response.StatusCode != http.StatusNotModified
 
 	// NOTE(simon): Get Etag header
 	if httpEtag := response.Header["Etag"]; len(httpEtag) > 0 {
@@ -89,7 +85,7 @@ func pollUrl(url string) (response *http.Response, changed bool, err error) {
 
 		// NOTE(simon): Did we parse the header?
 		if meta.LastModified.IsZero() {
-			log.Printf("Failed to parse Last-Modified header from %v: '%v'\n", url, httpLastModified)
+			log.Printf("Failed to parse Last-Modified header '%v'\n", httpLastModified)
 		}
 	}
 
@@ -100,10 +96,6 @@ func pollUrl(url string) (response *http.Response, changed bool, err error) {
 }
 
 
-
-type Config struct {
-	Urls []string `json:"urls"`
-}
 
 type Entry struct {
 	Id        string    `json:"id"`
@@ -188,13 +180,9 @@ func parseAtomDateOrNow(raw string) time.Time {
 	return time.Now()
 }
 
-var db *pgxpool.Pool
-var config Config
-
-func updateFeed(url string) {
+func pollFeed(url string) (feed Feed, entries []Entry, changed bool, err error) {
 	resp, changed, err := pollUrl(url)
 	if err != nil {
-		log.Printf("ERROR %v: %v\n", url, err)
 		return
 	}
 	defer resp.Body.Close()
@@ -206,7 +194,7 @@ func updateFeed(url string) {
 
 	// NOTE(simon): On a bad response we just skip this URL.
 	if resp.StatusCode != http.StatusOK {
-		log.Printf("ERROR %v: GET %s\n", url, resp.Status)
+		err = fmt.Errorf("GET %v", resp.Status)
 		return
 	}
 
@@ -214,21 +202,21 @@ func updateFeed(url string) {
 
 	// NOTE(simon): Find the first start element to determine the kind of feed we have.
 	var startToken xml.StartElement
-	for err == nil && startToken.Name.Local == "" {
+	for startToken.Name.Local == "" {
 		var token xml.Token
 		token, err = decoder.Token()
 
-		if err == nil {
-			switch token := token.(type) {
-			case xml.StartElement:
-				startToken = token
-			}
+		if err != nil {
+			return
+		}
+
+		switch token := token.(type) {
+		case xml.StartElement:
+			startToken = token
 		}
 	}
 
-	var feed    Feed
-	var entries []Entry
-
+	// NOTE(simon): Parse the feed based on startToken.
 	switch startToken.Name.Local {
 	case "rss":
 		type RssItem struct {
@@ -259,7 +247,7 @@ func updateFeed(url string) {
 		var rssFeed RssFeed
 		err = decoder.DecodeElement(&rssFeed, &startToken)
 		if err != nil {
-			rssFeed = RssFeed{}
+			return
 		}
 
 		// NOTE(simon): Restructure to our internal format.
@@ -296,7 +284,6 @@ func updateFeed(url string) {
 			Href     string   `xml:"href,attr"`
 			Rel      string   `xml:"rel,attr"`
 			Chardata string   `xml:",chardata"`
-
 		}
 
 		type AtomEntry struct {
@@ -322,7 +309,7 @@ func updateFeed(url string) {
 		var atomFeed AtomFeed
 		err = decoder.DecodeElement(&atomFeed, &startToken)
 		if err != nil {
-			atomFeed = AtomFeed{}
+			return
 		}
 
 		// NOTE(simon): Restructure to our internal format.
@@ -360,53 +347,68 @@ func updateFeed(url string) {
 			entries = append(entries, entry)
 		}
 	default:
-		if err == nil {
-			err = fmt.Errorf("Unknown feed type \"%v\"\n", startToken.Name.Local)
-		}
+		err = fmt.Errorf("Unknown feed type \"%v\"\n", startToken.Name.Local)
+		return
+	}
+
+	return
+}
+
+
+
+var db *pgxpool.Pool
+
+func updateFeed(url string) {
+	feed, entries, changed, err := pollFeed(url)
+	if err != nil {
+		log.Printf("ERROR %v: %v\n", url, err)
+		return
+	}
+
+	// NOTE(simon): If nothing changed, we are done!
+	if !changed {
+		return
 	}
 
 	// NOTE(simon): Update database.
-	if err == nil {
-		batch := &pgx.Batch{}
-		feedQuery := `
-			INSERT INTO Feeds VALUES (@id, @title, @description, @link, @updated)
-			ON CONFLICT (id) DO
-			UPDATE SET title = @title, description = @description, link = @link, updated = @updated
-			WHERE Feeds.updated < @updated;
+	batch := &pgx.Batch{}
+	feedQuery := `
+		INSERT INTO Feeds VALUES (@id, @title, @description, @link, @updated)
+		ON CONFLICT (id) DO
+		UPDATE SET title = @title, description = @description, link = @link, updated = @updated
+		WHERE Feeds.updated < @updated;
+	`
+	args := pgx.NamedArgs{
+		"id":          feed.Id,
+		"title":       feed.Title,
+		"description": feed.Description,
+		"link":        feed.Link,
+		"updated":     feed.Updated,
+	}
+	batch.Queue(feedQuery, args)
+
+	for _, entry := range entries {
+		entryQuery := `
+			INSERT INTO Entries VALUES (@id, @feed, @title, @published, @updated, @link)
+			ON CONFLICT (id, feed) DO
+			UPDATE SET title = @title, updated = @updated, link = @link
+			WHERE Entries.updated < @updated;
 		`
 		args := pgx.NamedArgs{
-			"id":          feed.Id,
-			"title":       feed.Title,
-			"description": feed.Description,
-			"link":        feed.Link,
-			"updated":     feed.Updated,
+			"id":        entry.Id,
+			"feed":      entry.Feed,
+			"title":     entry.Title,
+			"published": entry.Published,
+			"updated":   entry.Updated,
+			"link":      entry.Link,
 		}
-		batch.Queue(feedQuery, args)
-
-		for _, entry := range entries {
-			entryQuery := `
-				INSERT INTO Entries VALUES (@id, @feed, @title, @published, @updated, @link)
-				ON CONFLICT (id, feed) DO
-				UPDATE SET title = @title, updated = @updated, link = @link
-				WHERE Entries.updated < @updated;
-			`
-			args := pgx.NamedArgs{
-				"id":        entry.Id,
-				"feed":      entry.Feed,
-				"title":     entry.Title,
-				"published": entry.Published,
-				"updated":   entry.Updated,
-				"link":      entry.Link,
-			}
-			batch.Queue(entryQuery, args)
-		}
-
-		// NOTE(simon): Execute batch inserts.
-		results := db.SendBatch(context.Background(), batch)
-		err = results.Close()
+		batch.Queue(entryQuery, args)
 	}
 
-	// NOTE(simon): Common logging.
+	// NOTE(simon): Execute batch inserts.
+	results := db.SendBatch(context.Background(), batch)
+	err = results.Close()
+
 	if err != nil {
 		log.Printf("ERROR %v: %v\n", url, err)
 	}
@@ -442,6 +444,13 @@ func update() {
 		log.Printf("INFO: Feed updated finished: %s\n", time.Since(beforeUpdate))
 	}
 }
+
+
+
+type Config struct {
+	Urls []string `json:"urls"`
+}
+var config Config
 
 //go:embed init.sql
 var dbSqlInit string
