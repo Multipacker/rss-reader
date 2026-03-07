@@ -19,6 +19,88 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+
+
+type HttpMeta struct {
+	Etag         string
+	LastModified time.Time
+}
+
+var httpMetaCache sync.Map
+
+func pollUrl(url string) (response *http.Response, changed bool, err error) {
+	// NOTE(simon): Create the request.
+	request, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return
+	}
+
+	// NOTE(simon): Query meta information
+	var meta HttpMeta
+	if metaInterface, hasMeta := httpMetaCache.Load(url); hasMeta {
+		meta = metaInterface.(HttpMeta)
+	}
+
+	// NOTE(simon): Add conditions from previous requests.
+	if !meta.LastModified.IsZero() {
+		request.Header.Add("If-Modified-Since", meta.LastModified.UTC().Format("Mon, 02 Jan 2006 15:04:05 GMT"))
+	}
+	if len(meta.Etag) > 0 {
+		request.Header.Add("If-None-Match", meta.Etag)
+	}
+
+	response, err = (&http.Client{}).Do(request)
+	if err != nil {
+		return
+	}
+
+	// NOTE(simon): Has the content changed?
+	if response.StatusCode == http.StatusOK {
+		changed = true
+	} else if response.StatusCode == http.StatusNotModified {
+		changed = false
+	}
+
+	// NOTE(simon): Get Etag header
+	if httpEtag := response.Header["Etag"]; len(httpEtag) > 0 {
+		// NOTE(simon): There might be multiple items due to the interface, but
+		// the HTTP spec only allows one, so we use the first one.
+		meta.Etag = httpEtag[0]
+	}
+
+	// NOTE(simon): Get Last-Modifed header
+	if httpLastModified := response.Header["Last-Modified"]; len(httpLastModified) > 0 {
+		// NOTE(simon): There might be multiple items due to the interface, but
+		// the HTTP spec only allows one, so we use the first one.
+		httpLastModified := httpLastModified[0]
+
+		formats := []string{
+			time.RFC1123,                   // From HTTP spec
+			"Mon, 2 Jan 2006 15:04:05 MST", // Some don't zero-pad the days
+		}
+
+		// NOTE(simon): Try different time formats until one parses.
+		for _, format := range formats {
+			if parsed, err := time.Parse(format, httpLastModified); err == nil {
+				meta.LastModified = parsed
+				break
+			}
+		}
+
+		// NOTE(simon): Did we parse the header?
+		if meta.LastModified.IsZero() {
+			log.Printf("Failed to parse Last-Modified header from %v: '%v'\n", url, httpLastModified)
+		}
+	}
+
+	// NOTE(simon): Update meta cache.
+	httpMetaCache.Store(url, meta)
+
+	return
+}
+
+
+
 type Config struct {
 	Urls []string `json:"urls"`
 }
@@ -109,134 +191,26 @@ func parseAtomDateOrNow(raw string) time.Time {
 var db *pgxpool.Pool
 var config Config
 
-func handleFeeds(w http.ResponseWriter, request *http.Request) {
-	if request.Method != "GET" {
-		w.WriteHeader(http.StatusMethodNotAllowed)
+func updateFeed(url string) {
+	resp, changed, err := pollUrl(url)
+	if err != nil {
+		log.Printf("ERROR %v: %v\n", url, err)
+		return
+	}
+	defer resp.Body.Close()
+
+	// NOTE(simon): If nothing changed, we are done!
+	if !changed {
 		return
 	}
 
-	query := `SELECT id, title, description, link, updated FROM Feeds;`
-	rows, err := db.Query(request.Context(), query)
-
-	var parsedRows []Feed
-	if err == nil {
-		parsedRows, err = pgx.CollectRows(rows, pgx.RowToStructByName[Feed])
-	}
-
-	var encoded []byte
-	if err == nil {
-		encoded, err = json.Marshal(parsedRows)
-	}
-
-	if err == nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		w.Write(encoded)
-	} else {
-		w.WriteHeader(http.StatusInternalServerError)
-		log.Printf("ERROR: %v\n", err)
-	}
-}
-
-func handleEntries(w http.ResponseWriter, request *http.Request) {
-	if request.Method != "GET" {
-		w.WriteHeader(http.StatusMethodNotAllowed)
+	// NOTE(simon): On a bad response we just skip this URL.
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("ERROR %v: GET %s\n", url, resp.Status)
 		return
 	}
 
-	query := `SELECT * FROM Entries ORDER BY published DESC;`
-	rows, err := db.Query(request.Context(), query)
-
-	var parsedRows []Entry
-	if err == nil {
-		parsedRows, err = pgx.CollectRows(rows, pgx.RowToStructByName[Entry])
-	}
-
-	var encoded []byte
-	if err == nil {
-		encoded, err = json.Marshal(parsedRows)
-	}
-
-	if err == nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		w.Write(encoded)
-	} else {
-		w.WriteHeader(http.StatusInternalServerError)
-		log.Printf("ERROR: %v\n", err)
-	}
-}
-
-func updateFeed(url string, etag string, lastModified time.Time) {
-	var err error
-
-	// NOTE(simon): Build request.
-	var request *http.Request
-	if err == nil {
-		request, err = http.NewRequest("GET", url, nil)
-	}
-	if err == nil {
-		if !lastModified.IsZero() {
-			request.Header.Add("If-Modified-Since", lastModified.UTC().Format("Mon, 02 Jan 2006 15:04:05 GMT"))
-		}
-		if len(etag) > 0 {
-			request.Header.Add("If-None-Match", etag)
-		}
-	}
-
-	var resp *http.Response
-	if err == nil {
-		resp, err = (&http.Client{}).Do(request)
-	}
-
-	var decoder *xml.Decoder
-	if err == nil {
-		defer resp.Body.Close()
-
-		if resp.StatusCode == http.StatusOK {
-			decoder = xml.NewDecoder(resp.Body)
-		} else if resp.StatusCode == http.StatusNotModified {
-			log.Printf("INFO %v: Already up to date\n", url)
-			return
-		} else {
-			err = fmt.Errorf("GET %s", resp.Status)
-		}
-	}
-
-	// NOTE(simon): Get headers
-	var newEtag string
-	var newLastModified time.Time
-	if err == nil {
-		// NOTE(simon): Get Etag header
-		if httpEtag := resp.Header["Etag"]; len(httpEtag) > 0 {
-			// NOTE(simon): There might be multiple items due to the interface, but
-			// the HTTP spec only allows one, so we use the first one.
-			newEtag = httpEtag[0]
-		}
-
-		// NOTE(simon): Get Last-Modifed header
-		if httpLastModified := resp.Header["Last-Modified"]; len(httpLastModified) > 0 {
-			// NOTE(simon): There might be multiple items due to the interface, but
-			// the HTTP spec only allows one, so we use the first one.
-			httpLastModified := httpLastModified[0]
-
-			formats := []string{
-				time.RFC1123,                   // From HTTP spec
-				"Mon, 2 Jan 2006 15:04:05 MST", // Some don't zero-pad the days
-			}
-
-			for _, format := range formats {
-				if parsed, err := time.Parse(format, httpLastModified); err == nil {
-					newLastModified = parsed
-					break
-				}
-			}
-
-			if newLastModified.IsZero() {
-				log.Printf("ERROR %v: Failed to parse Last-Modified header '%v', ignoring\n", url, httpLastModified)
-			}
-		}
-	}
+	decoder := xml.NewDecoder(resp.Body)
 
 	// NOTE(simon): Find the first start element to determine the kind of feed we have.
 	var startToken xml.StartElement
@@ -395,19 +369,17 @@ func updateFeed(url string, etag string, lastModified time.Time) {
 	if err == nil {
 		batch := &pgx.Batch{}
 		feedQuery := `
-			INSERT INTO Feeds VALUES (@id, @title, @description, @link, @updated, @etag, @lastModified)
+			INSERT INTO Feeds VALUES (@id, @title, @description, @link, @updated)
 			ON CONFLICT (id) DO
-			UPDATE SET title = @title, description = @description, link = @link, updated = @updated, etag = @etag, lastModified = @lastModified
+			UPDATE SET title = @title, description = @description, link = @link, updated = @updated
 			WHERE Feeds.updated < @updated;
 		`
 		args := pgx.NamedArgs{
-			"id":           feed.Id,
-			"title":        feed.Title,
-			"description":  feed.Description,
-			"link":         feed.Link,
-			"updated":      feed.Updated,
-			"etag":         newEtag,
-			"lastModified": newLastModified,
+			"id":          feed.Id,
+			"title":       feed.Title,
+			"description": feed.Description,
+			"link":        feed.Link,
+			"updated":     feed.Updated,
 		}
 		batch.Queue(feedQuery, args)
 
@@ -447,35 +419,26 @@ func update() {
 		log.Println("INFO: Updating feeds")
 		beforeUpdate := time.Now()
 
-		// NOTE(simon): Gather feeds and http metadata
-		type FeedMeta struct {
-			link         string
-			etag         string
-			lastModified time.Time
-		}
-
-		rows, err := db.Query(context.Background(), `SELECT link, etag, lastModified FROM Feeds`)
-
-		var metas []FeedMeta
+		// NOTE(simon): Gather and dispatch all updates.
+		rows, err := db.Query(context.Background(), `SELECT link FROM Feeds`)
 		if err == nil {
-			metas, err = pgx.CollectRows(rows, pgx.RowToStructByName[FeedMeta])
+			var link string
+			var wg sync.WaitGroup
+			_, err = pgx.ForEachRow(rows, []any{&link}, func() error {
+				wg.Add(1)
+				go func(link string) {
+					defer wg.Done()
+					updateFeed(link)
+				}(link)
+				return nil
+			})
+			wg.Wait()
 		}
 
 		if err != nil {
 			log.Printf("ERROR: %v\n", err)
 		}
 
-		// NOTE(simon): Dispatch all updates.
-		var wg sync.WaitGroup
-		for _, meta := range metas {
-			wg.Add(1)
-			go func(meta FeedMeta) {
-				defer wg.Done()
-				updateFeed(meta.link, meta.etag, meta.lastModified)
-			}(meta)
-		}
-
-		wg.Wait()
 		log.Printf("INFO: Feed updated finished: %s\n", time.Since(beforeUpdate))
 	}
 }
@@ -528,6 +491,54 @@ func createDatabase() {
 	}
 }
 
+func handleFeeds(w http.ResponseWriter, request *http.Request) {
+	query := `SELECT id, title, description, link, updated FROM Feeds;`
+	rows, err := db.Query(request.Context(), query)
+
+	var parsedRows []Feed
+	if err == nil {
+		parsedRows, err = pgx.CollectRows(rows, pgx.RowToStructByName[Feed])
+	}
+
+	var encoded []byte
+	if err == nil {
+		encoded, err = json.Marshal(parsedRows)
+	}
+
+	if err == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write(encoded)
+	} else {
+		w.WriteHeader(http.StatusInternalServerError)
+		log.Printf("ERROR: %v\n", err)
+	}
+}
+
+func handleEntries(w http.ResponseWriter, request *http.Request) {
+	query := `SELECT * FROM Entries ORDER BY published DESC;`
+	rows, err := db.Query(request.Context(), query)
+
+	var parsedRows []Entry
+	if err == nil {
+		parsedRows, err = pgx.CollectRows(rows, pgx.RowToStructByName[Entry])
+	}
+
+	var encoded []byte
+	if err == nil {
+		encoded, err = json.Marshal(parsedRows)
+	}
+
+	if err == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write(encoded)
+	} else {
+		w.WriteHeader(http.StatusInternalServerError)
+		log.Printf("ERROR: %v\n", err)
+	}
+}
+
 func middlewareLogging(logger *log.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func (w http.ResponseWriter, r *http.Request) {
 		logger.Printf("\"%v %v %v\" \"%v\" %v\n", r.Method, r.URL.Path, r.Proto, r.UserAgent(), r.RemoteAddr)
@@ -567,7 +578,7 @@ func main() {
 	// NOTE(simon): Fetch initial feeds
 	log.Println("Fetching feeds from config")
 	for _, link := range config.Urls {
-		go updateFeed(link, "", time.Time{})
+		go updateFeed(link)
 	}
 
 	// NOTE(simon): Start update routing in a separte goroutine.
@@ -595,8 +606,8 @@ func main() {
 
 	// NOTE(simon): Setup and start the server.
 	http.Handle("/", staticHandler)
-	http.HandleFunc("/feeds", handleFeeds)
-	http.HandleFunc("/entries", handleEntries)
+	http.HandleFunc("GET /feeds", handleFeeds)
+	http.HandleFunc("GET /entries", handleEntries)
 
 	log.Printf("INFO: Serving on http://%s", address)
 	if err := http.ListenAndServe(address, middlewareLogging(log.Default(), http.DefaultServeMux)); err != nil {
