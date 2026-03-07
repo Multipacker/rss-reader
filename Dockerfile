@@ -3,8 +3,7 @@ FROM golang:1.25.4-alpine3.22 AS build
 WORKDIR /rss
 
 # Copy sources
-COPY go.mod go.sum .
-COPY backend.go init.sql .
+COPY go.mod backend.go .
 COPY static/ static/
 
 # Compile

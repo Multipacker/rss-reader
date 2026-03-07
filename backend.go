@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"embed"
 	"encoding/json"
 	"encoding/xml"
@@ -11,12 +10,10 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 
@@ -356,10 +353,41 @@ func pollFeed(url string) (feed Feed, entries []Entry, changed bool, err error) 
 
 
 
-var db *pgxpool.Pool
+type Config struct {
+	Host            string
+	Port            int
+	Urls            []string
+	OutputDirectory string
+}
+
+var config     Config
+var allFeeds   sync.Map
+var allEntries sync.Map
+
+func jsonFromFeeds() ([]byte, error) {
+	// NOTE(simon): Collect all feeds.
+	var feeds []Feed
+	for _, feedInstance := range allFeeds.Range {
+		feed := feedInstance.(Feed)
+		feeds = append(feeds, feed)
+	}
+
+	return json.Marshal(feeds)
+}
+
+func jsonFromEntries() ([]byte, error) {
+	// NOTE(simon): Collect all entries.
+	var entries []Entry
+	for _, entryInstance := range allEntries.Range {
+		entry := entryInstance.(Entry)
+		entries = append(entries, entry)
+	}
+
+	return json.Marshal(entries)
+}
 
 func updateFeed(url string) {
-	feed, entries, changed, err := pollFeed(url)
+	newFeed, newEntries, changed, err := pollFeed(url)
 	if err != nil {
 		log.Printf("ERROR %v: %v\n", url, err)
 		return
@@ -370,48 +398,50 @@ func updateFeed(url string) {
 		return
 	}
 
-	// NOTE(simon): Update database.
-	batch := &pgx.Batch{}
-	feedQuery := `
-		INSERT INTO Feeds VALUES (@id, @title, @description, @link, @updated)
-		ON CONFLICT (id) DO
-		UPDATE SET title = @title, description = @description, link = @link, updated = @updated
-		WHERE Feeds.updated < @updated;
-	`
-	args := pgx.NamedArgs{
-		"id":          feed.Id,
-		"title":       feed.Title,
-		"description": feed.Description,
-		"link":        feed.Link,
-		"updated":     feed.Updated,
-	}
-	batch.Queue(feedQuery, args)
+	// NOTE(simon): Update stores.
+	allFeeds.Store(newFeed.Id, newFeed)
 
-	for _, entry := range entries {
-		entryQuery := `
-			INSERT INTO Entries VALUES (@id, @feed, @title, @published, @updated, @link)
-			ON CONFLICT (id, feed) DO
-			UPDATE SET title = @title, updated = @updated, link = @link
-			WHERE Entries.updated < @updated;
-		`
-		args := pgx.NamedArgs{
-			"id":        entry.Id,
-			"feed":      entry.Feed,
-			"title":     entry.Title,
-			"published": entry.Published,
-			"updated":   entry.Updated,
-			"link":      entry.Link,
+	// NOTE(simon): Update entries.
+	for _, newEntry := range newEntries {
+		updateEntry := true
+
+		// NOTE(simon): Merge with existing entry (keep the publish date).
+		if entryInstance, hasEntry := allEntries.Load(newEntry.Id); hasEntry {
+			oldEntry := entryInstance.(Entry)
+
+			newEntry.Published = oldEntry.Published
+			updateEntry = oldEntry.Updated.Before(newEntry.Updated)
 		}
-		batch.Queue(entryQuery, args)
+
+		if updateEntry {
+			allEntries.Store(newEntry.Id, newEntry)
+		}
 	}
+}
 
-	// NOTE(simon): Execute batch inserts.
-	results := db.SendBatch(context.Background(), batch)
-	err = results.Close()
+func atomicWriteFile(file string, data []byte) (err error) {
+	directory, _ := filepath.Split(file)
 
+	tempFile, err := os.CreateTemp(directory, "temp-*.json")
 	if err != nil {
-		log.Printf("ERROR %v: %v\n", url, err)
+		return
 	}
+	defer os.Remove(tempFile.Name())
+	defer tempFile.Close()
+
+	if _, err = tempFile.Write(data); err != nil {
+		return
+	}
+	if err = tempFile.Sync(); err != nil {
+		return
+	}
+	if err = tempFile.Close(); err != nil {
+		return
+	}
+
+	err = os.Rename(tempFile.Name(), file)
+
+	return
 }
 
 func update() {
@@ -421,24 +451,35 @@ func update() {
 		log.Println("INFO: Updating feeds")
 		beforeUpdate := time.Now()
 
-		// NOTE(simon): Gather and dispatch all updates.
-		rows, err := db.Query(context.Background(), `SELECT link FROM Feeds`)
-		if err == nil {
-			var link string
-			var wg sync.WaitGroup
-			_, err = pgx.ForEachRow(rows, []any{&link}, func() error {
-				wg.Add(1)
-				go func(link string) {
-					defer wg.Done()
-					updateFeed(link)
-				}(link)
-				return nil
-			})
-			wg.Wait()
+		// NOTE(simon): Dispatch updates to all feeds.
+		var wg sync.WaitGroup
+		for _, feedInstance := range allFeeds.Range {
+			feed := feedInstance.(Feed)
+
+			wg.Add(1)
+			go func(link string) {
+				defer wg.Done()
+				updateFeed(link)
+			}(feed.Link)
 		}
 
-		if err != nil {
-			log.Printf("ERROR: %v\n", err)
+		wg.Wait()
+
+		// NOTE(simon): Serialize to disk.
+		encodedFeeds,   feedsErr   := jsonFromFeeds()
+		encodedEntries, entriesErr := jsonFromEntries()
+		if feedsErr == nil {
+			feedsErr = atomicWriteFile(filepath.Join(config.OutputDirectory, "feeds.json"), encodedFeeds)
+			if feedsErr == nil && entriesErr == nil {
+				feedsErr = atomicWriteFile(filepath.Join(config.OutputDirectory, "entries.json"), encodedEntries)
+			}
+		}
+
+		if feedsErr != nil {
+			log.Printf("ERROR: Could not save feeds: %v\n", feedsErr)
+		}
+		if entriesErr != nil {
+			log.Printf("ERROR: Could not save entries: %v\n", entriesErr)
 		}
 
 		log.Printf("INFO: Feed updated finished: %s\n", time.Since(beforeUpdate))
@@ -447,105 +488,34 @@ func update() {
 
 
 
-type Config struct {
-	Urls []string `json:"urls"`
-}
-var config Config
 
-//go:embed init.sql
-var dbSqlInit string
 //go:embed all:static
 var staticFiles embed.FS
 
-func createDatabase() {
-	// NOTE(simon): Ensure we have a version table with one entry in it
-	query := `
-		CREATE TABLE IF NOT EXISTS Meta (
-			version INT NOT NULL PRIMARY KEY
-		);
-		INSERT INTO Meta(version) (SELECT -1 WHERE NOT EXISTS (SELECT * FROM Meta));
-	`
-	if _, err := db.Exec(context.Background(), query); err != nil {
-		log.Fatal(err)
-	}
-
-	// NOTE(simon): Query the current version.
-	var version int
-	if err := db.QueryRow(context.Background(), "SELECT version FROM Meta").Scan(&version); err != nil {
-		log.Fatal(err)
-	}
-
-	migrations := []string{
-		dbSqlInit,
-	}
-
-	for i, migration := range migrations[version + 1:] {
-		tx, err := db.Begin(context.Background())
-		if err != nil {
-			log.Fatal(err)
-		}
-		defer tx.Rollback(context.Background())
-
-		if _, err := db.Exec(context.Background(), migration); err != nil {
-			log.Fatal(err)
-		}
-
-		if _, err := db.Exec(context.Background(), "UPDATE Meta SET version = $1", version + 1 + i); err != nil {
-			log.Fatal(err)
-		}
-
-		if err := tx.Commit(context.Background()); err != nil {
-			log.Fatal(err)
-		}
-	}
-}
-
 func handleFeeds(w http.ResponseWriter, request *http.Request) {
-	query := `SELECT id, title, description, link, updated FROM Feeds;`
-	rows, err := db.Query(request.Context(), query)
+	encoded, err := jsonFromFeeds()
 
-	var parsedRows []Feed
-	if err == nil {
-		parsedRows, err = pgx.CollectRows(rows, pgx.RowToStructByName[Feed])
-	}
-
-	var encoded []byte
-	if err == nil {
-		encoded, err = json.Marshal(parsedRows)
-	}
-
-	if err == nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		w.Write(encoded)
-	} else {
+	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
-		log.Printf("ERROR: %v\n", err)
+		return
 	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(encoded)
 }
 
 func handleEntries(w http.ResponseWriter, request *http.Request) {
-	query := `SELECT * FROM Entries ORDER BY published DESC;`
-	rows, err := db.Query(request.Context(), query)
+	encoded, err := jsonFromEntries()
 
-	var parsedRows []Entry
-	if err == nil {
-		parsedRows, err = pgx.CollectRows(rows, pgx.RowToStructByName[Entry])
-	}
-
-	var encoded []byte
-	if err == nil {
-		encoded, err = json.Marshal(parsedRows)
-	}
-
-	if err == nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		w.Write(encoded)
-	} else {
+	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
-		log.Printf("ERROR: %v\n", err)
+		return
 	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(encoded)
 }
 
 func middlewareLogging(logger *log.Logger, next http.Handler) http.Handler {
@@ -572,17 +542,47 @@ func main() {
 		if err := json.Unmarshal(configContent, &config); err != nil {
 			log.Fatal(err)
 		}
+
+		if config.Host == "" {
+			config.Host = "localhost"
+		}
+		if config.Port == 0 {
+			config.Port = 8080
+		}
 	}
 
-	// NOTE(simon): Connect to the database.
-	var err error
-	db, err = pgxpool.New(context.Background(), os.Getenv("DATABASE_URL"))
-	if err != nil {
-		log.Fatalf("Unable to create connection pool: %v\n", err)
+	// NOTE(simon): Ensure that the directory exists.
+	if config.OutputDirectory != "" {
+		if err := os.MkdirAll(config.OutputDirectory, 0755); err != nil {
+			log.Fatal(err)
+		}
 	}
-	defer db.Close()
 
-	createDatabase()
+	// NOTE(simon): Load old feeds and entries.
+	if feedsContent, err := os.ReadFile(filepath.Join(config.OutputDirectory, "feeds.json")); err == nil {
+		var feeds []Feed
+		if err := json.Unmarshal(feedsContent, &feeds); err != nil {
+			log.Fatal(err)
+		}
+
+		for _, feed := range feeds {
+			allFeeds.Store(feed.Id, feed)
+		}
+	} else if _, ok := err.(*os.PathError); !ok {
+		log.Fatal(err)
+	}
+	if entriesContent, err := os.ReadFile(filepath.Join(config.OutputDirectory, "entries.json")); err == nil {
+		var entries []Entry
+		if err := json.Unmarshal(entriesContent, &entries); err != nil {
+			log.Fatal(err)
+		}
+
+		for _, entry := range entries {
+			allEntries.Store(entry.Id, entry)
+		}
+	} else if _, ok := err.(*os.PathError); !ok {
+		log.Fatal(err)
+	}
 
 	// NOTE(simon): Fetch initial feeds
 	log.Println("Fetching feeds from config")
@@ -592,17 +592,6 @@ func main() {
 
 	// NOTE(simon): Start update routing in a separte goroutine.
 	go update()
-
-	// NOTE(simon): Build the address to listen on from environment variables ADDR and PORT.
-	host := "localhost"
-	port := "8080"
-	if hostEnv, ok := os.LookupEnv("ADDR"); ok {
-		host = hostEnv
-	}
-	if portEnv, ok := os.LookupEnv("PORT"); ok {
-		port = portEnv
-	}
-	address := fmt.Sprintf("%s:%s", host, port)
 
 	// NOTE(simon): Setup handler for reloading of static files
 	var staticHandler http.Handler
@@ -618,6 +607,7 @@ func main() {
 	http.HandleFunc("GET /feeds", handleFeeds)
 	http.HandleFunc("GET /entries", handleEntries)
 
+	address := fmt.Sprintf("%s:%s", config.Host, config.Port)
 	log.Printf("INFO: Serving on http://%s", address)
 	if err := http.ListenAndServe(address, middlewareLogging(log.Default(), http.DefaultServeMux)); err != nil {
 		log.Fatal(err)
