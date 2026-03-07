@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"embed"
 	"encoding/json"
 	"encoding/xml"
-	_ "embed"
+	"flag"
 	"fmt"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -480,6 +482,8 @@ func update() {
 
 //go:embed init.sql
 var dbSqlInit string
+//go:embed all:static
+var staticFiles embed.FS
 
 func createDatabase() {
 	// NOTE(simon): Ensure we have a version table with one entry in it
@@ -535,6 +539,10 @@ func main() {
 	// NOTE(simon): Configure the logger to give more accurate timing information.
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
 
+	// NOTE(simon): Parse command line arguments.
+	reload := flag.Bool("reload", false, "reload static files on page refresh")
+	flag.Parse()
+
 	// NOTE(simon): Load the configuration file.
 	{
 		configContent, err := os.ReadFile("config.json")
@@ -576,13 +584,20 @@ func main() {
 	}
 	address := fmt.Sprintf("%s:%s", host, port)
 
-	// NOTE(simon): Configure the routes.
-	fileServer := http.FileServer(http.Dir("static"))
-	http.Handle("/", fileServer)
+	// NOTE(simon): Setup handler for reloading of static files
+	var staticHandler http.Handler
+	if *reload {
+		staticHandler = http.FileServer(http.Dir("static"))
+	} else {
+		root, _ := fs.Sub(staticFiles, "static")
+		staticHandler = http.FileServerFS(root)
+	}
+
+	// NOTE(simon): Setup and start the server.
+	http.Handle("/", staticHandler)
 	http.HandleFunc("/feeds", handleFeeds)
 	http.HandleFunc("/entries", handleEntries)
 
-	// NOTE(simon): Start the server with the configured address and the handlers configured above.
 	log.Printf("INFO: Serving on http://%s", address)
 	if err := http.ListenAndServe(address, middlewareLogging(log.Default(), http.DefaultServeMux)); err != nil {
 		log.Fatal(err)

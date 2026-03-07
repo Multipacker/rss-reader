@@ -4,10 +4,11 @@ WORKDIR /rss
 
 # Copy sources
 COPY go.mod go.sum .
-COPY src/ src/
+COPY backend.go init.sql .
+COPY static/ static/
 
 # Compile
-RUN go build -o server ./src
+RUN go build -o server .
 
 # Run
 FROM alpine:3.23.2
@@ -15,6 +16,5 @@ WORKDIR /rss
 
 # Copy binary and static files
 COPY --from=build /rss/server /rss/server
-COPY static/ static/
 
 CMD /rss/server
