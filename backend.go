@@ -525,6 +525,24 @@ func middlewareLogging(logger *log.Logger, next http.Handler) http.Handler {
 	})
 }
 
+func readConfig() {
+	configContent, err := os.ReadFile("config.json")
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := json.Unmarshal(configContent, &config); err != nil {
+		log.Fatal(err)
+	}
+
+	// Validate and set defaults.
+	if config.Host == "" {
+		config.Host = "localhost"
+	}
+	if config.Port == 0 {
+		config.Port = 8080
+	}
+}
+
 func main() {
 	// NOTE(simon): Configure the logger to give more accurate timing information.
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
@@ -533,25 +551,9 @@ func main() {
 	reload := flag.Bool("reload", false, "reload static files on page refresh")
 	flag.Parse()
 
-	// NOTE(simon): Load the configuration file.
-	{
-		configContent, err := os.ReadFile("config.json")
-		if err != nil {
-			log.Fatal(err)
-		}
-		if err := json.Unmarshal(configContent, &config); err != nil {
-			log.Fatal(err)
-		}
+	readConfig()
 
-		if config.Host == "" {
-			config.Host = "localhost"
-		}
-		if config.Port == 0 {
-			config.Port = 8080
-		}
-	}
-
-	// NOTE(simon): Ensure that the directory exists.
+	// NOTE(simon): Ensure that the output directory exists.
 	if config.OutputDirectory != "" {
 		if err := os.MkdirAll(config.OutputDirectory, 0755); err != nil {
 			log.Fatal(err)
@@ -590,7 +592,7 @@ func main() {
 		go updateFeed(link)
 	}
 
-	// NOTE(simon): Start update routing in a separte goroutine.
+	// NOTE(simon): Start feed update process.
 	go update()
 
 	// NOTE(simon): Setup handler for reloading of static files
@@ -607,7 +609,7 @@ func main() {
 	http.HandleFunc("GET /feeds", handleFeeds)
 	http.HandleFunc("GET /entries", handleEntries)
 
-	address := fmt.Sprintf("%s:%s", config.Host, config.Port)
+	address := fmt.Sprintf("%s:%d", config.Host, config.Port)
 	log.Printf("INFO: Serving on http://%s", address)
 	if err := http.ListenAndServe(address, middlewareLogging(log.Default(), http.DefaultServeMux)); err != nil {
 		log.Fatal(err)
