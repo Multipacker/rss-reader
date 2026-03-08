@@ -152,21 +152,21 @@ const update_list = () => {
             const elem = document.importNode(template.content, true);
 
             const htmlItem        = elem.querySelector(".item");
-            const itemLink        = elem.querySelector(".item-link");
+            const itemTitle        = elem.querySelector(".item-title");
             const itemDescription = elem.querySelector(".item-description");
 
             if (item.readable) {
                 if (read_articles.has(item.id)) {
                     htmlItem.classList.add("read");
                 }
-                itemLink.onclick = () => {
+                htmlItem.onclick = () => {
                     htmlItem.classList.add("read");
                     save_read(item.id);
                 }
             }
 
-            itemLink.append(...highlight(item.title));
-            itemLink.setAttribute("href", item.link);
+            htmlItem.setAttribute("href", item.link);
+            itemTitle.append(...highlight(item.title));
             itemDescription.append(...highlight(item.description));
 
             return elem;

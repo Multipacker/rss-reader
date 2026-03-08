@@ -11,27 +11,27 @@
     </head>
     <body style="margin: 0;">
         <template id="item-template">
-            <li class="item">
-                <a class="item-link"></a>
+            <a class="item">
+                <p class="item-title"></p>
                 <p class="item-description"></p>
-            </li>
+            </a>
         </template>
-        <main style="display: flex; flex-direction: column;">
-            <h1 style="text-align: center;">RSS Feed</h1>
+        <main style="display: flex; flex-direction: column; gap: 0.5em;">
+            <h1 style="text-align: center; margin-bottom: 0;">RSS Feed</h1>
 
-            <select id="search_type" oninput="update_list();">
-                <option>Articles</option>
-                <option>Feeds</option>
-            </select>
-            <div style="display: flex;">
+            <div style="display: flex; justify-content: center; flex-wrap: wrap; gap: 0.5em; margin-left: 0.5em; margin-right: 0.5em;">
                 <select id="search_filter" oninput="update_list();">
                     <option>All</option>
                     <option>Read</option>
                     <option>Unread</option>
                 </select>
-                <input id="search" placeholder="Search..." type="search" style="flex: 1;" oninput="update_list();"></input>
+                <select id="search_type" oninput="update_list();">
+                    <option>Articles</option>
+                    <option>Feeds</option>
+                </select>
+                <input id="search" style="flex: 1;" placeholder="Search..." type="search" oninput="update_list();"></input>
             </div>
-            <ul id="results"></ul>
+            <div id="results"></div>
         </main>
     </body>
 </html>

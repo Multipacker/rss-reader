@@ -24,8 +24,6 @@
         --background-color:             var(--oc-gray0);
         --alternative-background-color: var(--oc-gray1);
         --border-color:                 var(--oc-gray3);
-        --button-background-color:      var(--oc-gray1);
-        --button-border-color:          var(--oc-gray3);
         --selection-color:              var(--oc-gray6);
         --focus-color:                  var(--oc-orange4);
         --hover-color:                  var(--oc-gray6);
@@ -39,8 +37,6 @@
         --background-color:             var(--oc-gray9);
         --alternative-background-color: color-mix(in srgb, var(--oc-gray9) 80%, var(--oc-gray8));
         --border-color:                 var(--oc-gray7);
-        --button-background-color:      var(--oc-gray8);
-        --button-border-color:          var(--oc-gray7);
         --selection-color:              var(--oc-gray6);
         --focus-color:                  var(--oc-orange4);
         --hover-color:                  var(--oc-gray4);
@@ -98,13 +94,24 @@ input, select, button {
     color: inherit;
     padding: 0px 5px 0px 5px;
     margin: 0;
-    background-color: var(--button-background-color);
-    border: 2px solid var(--button-border-color);
+    background-color: var(--background-color);
+    border: 2px solid var(--border-color);
     transition: background-color 0.3s;
+    border-radius: 0.5em;
+}
+
+input:focus,  input:focus:hover,
+select:focus, select:focus:hover,
+button:focus, button:focus:hover {
+    background: color-mix(in srgb, var(--focus-color) 25%, transparent);
 }
 
 input:hover, select:hover, button:hover {
-    background: linear-gradient(rgb(255 255 255 / 5%), transparent), var(--button-background-color);
+    background: linear-gradient(rgb(255 255 255 / 5%), transparent), var(--background-color);
+}
+
+a {
+    color: inherit;
 }
 
 
@@ -127,9 +134,11 @@ input:hover, select:hover, button:hover {
 }
 
 .item {
+    display: block;
     position: relative;
     background: var(--background-color);
     padding: 10px;
+    text-decoration: none;
 }
 
 .item:nth-child(even) {
@@ -150,15 +159,15 @@ input:hover, select:hover, button:hover {
     background: linear-gradient(rgb(255 255 255 / 5%), transparent), var(--alternative-background-color);
 }
 
-.item a {
-    color: inherit;
-}
-
-.item.read a {
+.item.read {
     color: var(--weak-text-color);
 }
 
-.item p {
+.item-title {
+    margin: 0;
+}
+
+.item-description {
     font-size: 0.7em;
     color: var(--weak-text-color);
     margin: 0;
