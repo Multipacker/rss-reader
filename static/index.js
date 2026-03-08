@@ -58,7 +58,7 @@ const update_list = () => {
     const search_type   = document.getElementById("search_type");
     const search        = document.getElementById("search");
     const result_list   = document.getElementById("results");
-    const template      = document.getElementById("item-template");
+    const template      = document.getElementById("item_template");
 
     // NOTE(simon): Construct queries.
     const search_terms = search.value
