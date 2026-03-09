@@ -535,9 +535,6 @@ func readConfig() {
 	}
 
 	// Validate and set defaults.
-	if config.Host == "" {
-		config.Host = "localhost"
-	}
 	if config.Port == 0 {
 		config.Port = 8080
 	}
