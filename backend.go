@@ -6,9 +6,11 @@ import (
 	"encoding/xml"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -544,6 +546,9 @@ func main() {
 	// NOTE(simon): Configure the logger to give more accurate timing information.
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
 
+	backfillFeed();
+	return
+
 	// NOTE(simon): Parse command line arguments.
 	reload := flag.Bool("reload", false, "reload static files on page refresh")
 	flag.Parse()
@@ -611,4 +616,100 @@ func main() {
 	if err := http.ListenAndServe(address, middlewareLogging(log.Default(), http.DefaultServeMux)); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func backfillFeed() {
+	// TODO(simon): Set user agent
+	// TODO(simon): Honor 429 Too Many Requests and Retry-After
+
+	//url := "https://fgiesen.wordpress.com/feed/"
+	//url := "https://nullprogram.com/feed/"
+	feedUrl := "https://probablydance.com/feed/"
+
+	requestUrl, _ := url.Parse("http://web.archive.org/cdx/search/cdx")
+
+	// NOTE(simon): Filtering on mimetypes was problematic during testing, so
+	// we avoid it. I could not get it to filter for multiple mimetypes
+	// simultaneously, and only filtering for one would require us to do more
+	// queries. Better to do it ourselves.
+	query := url.Values{}
+	query.Set("fl", "timestamp,mimetype")
+	query.Add("filter", "statuscode:200")
+	query.Set("showResumeKey", "true")
+	query.Set("output", "json")
+	query.Set("url", feedUrl)
+
+	dates := make([]string, 0)
+	for {
+		// NOTE(simon): Issue request with query.
+		requestUrl.RawQuery = query.Encode()
+		response, err := http.Get(requestUrl.String())
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer response.Body.Close()
+
+		// NOTE(simon): Parse format, just an array of records, which is an
+		// array of fields.
+		var records [][]string
+		err = json.NewDecoder(response.Body).Decode(&records)
+		if err != nil {
+			log.Fatal(err)
+		}
+		recordCount := len(records)
+
+		// NOTE(simon): We need at least two lines to continue: The header, and
+		// at least one record.
+		if recordCount < 2 {
+			break
+		}
+
+		// NOTE(simon): Parse resume key if we have one.
+		resumeKey := ""
+		hasResumeKey := len(records[recordCount - 2]) == 0 && len(records[recordCount - 1]) == 1
+		if hasResumeKey {
+			resumeKey = records[recordCount - 1][0]
+			recordCount -= 2
+		}
+
+		// NOTE(simon): Parse records, the first line has a header with field
+		// names, skip it and the footer with the resume key.
+		for _, line := range records[1:recordCount] {
+			// NOTE(simon): We expect two items per line.
+			if len(line) < 2 {
+				continue
+			}
+
+			date     := line[0]
+			mimetype := line[1]
+
+			// NOTE(simon): Do we have a valid mimetype?
+			if strings.Contains(mimetype, "application/xml") || strings.Contains(mimetype, "application/rss") {
+				dates = append(dates, date)
+			}
+		}
+
+		// NOTE(simon): Update query paramters if we have a resume key,
+		// otherwise we are done.
+		if resumeKey != "" {
+			query.Set("resumeKey", resumeKey)
+		} else {
+			break
+		}
+	}
+
+	log.Println(dates)
+
+	response, err := http.Get("https://web.archive.org/web/" + dates[0] + "id_/" + feedUrl)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer response.Body.Close()
+
+	buffer := new(strings.Builder)
+	_, err = io.Copy(buffer, response.Body)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(buffer.String())
 }
