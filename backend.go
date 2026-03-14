@@ -6,7 +6,6 @@ import (
 	"encoding/xml"
 	"flag"
 	"fmt"
-	"io"
 	"io/fs"
 	"log"
 	"net/http"
@@ -179,25 +178,14 @@ func parseAtomDateOrNow(raw string) time.Time {
 	return time.Now()
 }
 
-func pollFeed(url string) (feed Feed, entries []Entry, changed bool, err error) {
-	resp, changed, err := pollUrl(url)
-	if err != nil {
-		return
-	}
-	defer resp.Body.Close()
-
-	// NOTE(simon): If nothing changed, we are done!
-	if !changed {
-		return
-	}
-
+func parseFeed(response *http.Response, url string) (feed Feed, entries []Entry, err error) {
 	// NOTE(simon): On a bad response we just skip this URL.
-	if resp.StatusCode != http.StatusOK {
-		err = fmt.Errorf("GET %v", resp.Status)
+	if response.StatusCode != http.StatusOK {
+		err = fmt.Errorf("GET %v", response.Status)
 		return
 	}
 
-	decoder := xml.NewDecoder(resp.Body)
+	decoder := xml.NewDecoder(response.Body)
 
 	// NOTE(simon): Find the first start element to determine the kind of feed we have.
 	var startToken xml.StartElement
@@ -389,7 +377,19 @@ func jsonFromEntries() ([]byte, error) {
 }
 
 func updateFeed(url string) {
-	newFeed, newEntries, changed, err := pollFeed(url)
+	response, changed, err := pollUrl(url)
+	if err != nil {
+		log.Printf("ERROR %v: %v\n", url, err)
+		return
+	}
+	defer response.Body.Close()
+
+	// NOTE(simon): If nothing changed, we are done!
+	if !changed {
+		return
+	}
+
+	newFeed, newEntries, err := parseFeed(response, url)
 	if err != nil {
 		log.Printf("ERROR %v: %v\n", url, err)
 		return
@@ -546,7 +546,33 @@ func main() {
 	// NOTE(simon): Configure the logger to give more accurate timing information.
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
 
-	backfillFeed();
+	// feedUrl := "https://fgiesen.wordpress.com/feed/"
+	// feedUrl := "https://nullprogram.com/feed/"
+	feedUrl := "https://probablydance.com/feed/"
+	dates, err := queryWaybackSnapshotDates(feedUrl)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("Found %v snapshots\n", len(dates))
+	entries := make(map[string]Entry)
+	for _, date := range dates {
+		log.Printf("Fetching snapshot %v\n", date)
+		response, err := fetchWaybackFeed(feedUrl, date)
+		if err != nil {
+			log.Println(err)
+			continue
+		}
+
+		_, newEntries, err := parseFeed(response, feedUrl)
+		if err != nil {
+			log.Println(err)
+			continue
+		}
+		for _, entry := range newEntries {
+			entries[entry.Id] = entry
+		}
+	}
+	log.Println(entries)
 	return
 
 	// NOTE(simon): Parse command line arguments.
@@ -618,14 +644,15 @@ func main() {
 	}
 }
 
-func backfillFeed() {
+func fetchWaybackFeed(feedUrl, date string) (response *http.Response, err error) {
 	// TODO(simon): Set user agent
 	// TODO(simon): Honor 429 Too Many Requests and Retry-After
+	response, err = http.Get("https://web.archive.org/web/" + date + "id_/" + feedUrl)
+	return
+}
 
-	//url := "https://fgiesen.wordpress.com/feed/"
-	//url := "https://nullprogram.com/feed/"
-	feedUrl := "https://probablydance.com/feed/"
-
+func queryWaybackSnapshotDates(feedUrl string) (dates []string, err error) {
+	// NOTE(simon): Always valid so skip the error.
 	requestUrl, _ := url.Parse("http://web.archive.org/cdx/search/cdx")
 
 	// NOTE(simon): Filtering on mimetypes was problematic during testing, so
@@ -639,23 +666,89 @@ func backfillFeed() {
 	query.Set("output", "json")
 	query.Set("url", feedUrl)
 
-	dates := make([]string, 0)
+	exponentialBackoffBase  := 1 * time.Minute
+	exponentialBackoffTries := 0
+
 	for {
-		// NOTE(simon): Issue request with query.
+		// NOTE(simon): Setup request with custom headers.
 		requestUrl.RawQuery = query.Encode()
-		response, err := http.Get(requestUrl.String())
+
+		var request *http.Request
+		request, err = http.NewRequest("GET", requestUrl.String(), nil)
 		if err != nil {
-			log.Fatal(err)
+			return
+		}
+
+		request.Header.Set("User-Agent", "SilverFeed/1.0")
+
+		// NOTE(simon): Issue request with query.
+		var response *http.Response
+		response, err = http.DefaultClient.Do(request)
+		if err != nil {
+			return
 		}
 		defer response.Body.Close()
+
+		// NOTE(simon): Are we fetching too quickly? Take a break.
+		if response.StatusCode == http.StatusTooManyRequests {
+			response.Body.Close()
+
+			var waitDuration time.Duration
+			var retryErr error
+
+			// NOTE(simon): Try to parse the Retry-After header.
+			if retryAfter := response.Header["Retry-After"]; len(retryAfter) > 0 {
+				retryAfter := retryAfter[0]
+
+				// NOTE(simon): Try to parse it as a duration.
+				waitDuration, retryErr = time.ParseDuration(retryAfter + "s")
+
+				if retryErr != nil {
+					// NOTE(simon): Try to parse it as a specific date.
+					retryDate, retryErr := http.ParseTime(retryAfter)
+					if retryErr == nil {
+						waitDuration = time.Until(retryDate)
+					}
+				}
+			} else {
+				retryErr = fmt.Errorf("Header is not present")
+			}
+
+			// NOTE(simon): We somehow failed to parse the date, use exponential backoff.
+			if retryErr != nil {
+				// NOTE(simon): Arbitrary decision to abort after 5 failed attempts of exponential backoff.
+				if exponentialBackoffTries > 5 {
+					err = fmt.Errorf("Received %v after %v attempts of exponential backoff", response.Status, exponentialBackoffTries)
+					return
+				}
+
+				waitDuration = exponentialBackoffBase * (1 << exponentialBackoffTries)
+				exponentialBackoffTries += 1
+				log.Printf("Received %v but failed to parse Retry-After header: %v. Using exponential backoff of %v.\n", response.Status, retryErr, waitDuration)
+			} else {
+				log.Printf("Received %v, waiting %v.\n", response.Status, waitDuration)
+			}
+
+			// NOTE(simon): Wait and then retry the same request again.
+			time.Sleep(waitDuration)
+			continue
+		} else if response.StatusCode != http.StatusOK {
+			err = fmt.Errorf("GET %v", response.Status)
+			return
+		}
+
+		// NOTE(simon): We got a response! Reset backoff time in the hopes of faster answers.
+		exponentialBackoffTries = 0
 
 		// NOTE(simon): Parse format, just an array of records, which is an
 		// array of fields.
 		var records [][]string
 		err = json.NewDecoder(response.Body).Decode(&records)
 		if err != nil {
-			log.Fatal(err)
+			return
 		}
+		response.Body.Close()
+
 		recordCount := len(records)
 
 		// NOTE(simon): We need at least two lines to continue: The header, and
@@ -664,7 +757,9 @@ func backfillFeed() {
 			break
 		}
 
-		// NOTE(simon): Parse resume key if we have one.
+		// NOTE(simon): Parse resume key if we have one. It is identified by
+		// the second last record being empty and the last one containing the
+		// resume key.
 		resumeKey := ""
 		hasResumeKey := len(records[recordCount - 2]) == 0 && len(records[recordCount - 1]) == 1
 		if hasResumeKey {
@@ -698,18 +793,5 @@ func backfillFeed() {
 		}
 	}
 
-	log.Println(dates)
-
-	response, err := http.Get("https://web.archive.org/web/" + dates[0] + "id_/" + feedUrl)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer response.Body.Close()
-
-	buffer := new(strings.Builder)
-	_, err = io.Copy(buffer, response.Body)
-	if err != nil {
-		log.Fatal(err)
-	}
-	fmt.Println(buffer.String())
+	return
 }
