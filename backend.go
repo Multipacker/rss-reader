@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -89,6 +90,173 @@ func pollUrl(url string) (response *http.Response, changed bool, err error) {
 
 	// NOTE(simon): Update meta cache.
 	httpMetaCache.Store(url, meta)
+
+	return
+}
+
+type WaybackSnapshot struct {
+	Url  string
+	Date string
+}
+
+func fetchWaybackSnapshot(snapshot WaybackSnapshot) (response *http.Response, err error) {
+	// TODO(simon): Honor 429 Too Many Requests and Retry-After
+
+	request, err := http.NewRequest("GET", "https://web.archive.org/web/" + snapshot.Date + "id_/" + snapshot.Url, nil)
+	if err != nil {
+		return
+	}
+
+	request.Header.Set("User-Agent", "SilverFeed/1.0")
+
+	response, err = http.DefaultClient.Do(request)
+	return
+}
+
+func queryWaybackSnapshots(feedUrl string) (snapshots []WaybackSnapshot, err error) {
+	// NOTE(simon): Always valid so skip the error.
+	requestUrl, _ := url.Parse("http://web.archive.org/cdx/search/cdx")
+
+	// NOTE(simon): Filtering on mimetypes was problematic during testing, so
+	// we avoid it. I could not get it to filter for multiple mimetypes
+	// simultaneously, and only filtering for one would require us to do more
+	// queries. Better to do it ourselves.
+	query := url.Values{}
+	query.Set("fl", "timestamp,mimetype")
+	query.Add("filter", "statuscode:200")
+	query.Set("showResumeKey", "true")
+	query.Set("output", "json")
+	query.Set("url", feedUrl)
+
+	exponentialBackoffBase  := 1 * time.Minute
+	exponentialBackoffTries := 0
+
+	for {
+		// NOTE(simon): Setup request with custom headers.
+		requestUrl.RawQuery = query.Encode()
+
+		var request *http.Request
+		request, err = http.NewRequest("GET", requestUrl.String(), nil)
+		if err != nil {
+			return
+		}
+
+		request.Header.Set("User-Agent", "SilverFeed/1.0")
+
+		// NOTE(simon): Issue request with query.
+		var response *http.Response
+		response, err = http.DefaultClient.Do(request)
+		if err != nil {
+			return
+		}
+		defer response.Body.Close()
+
+		// NOTE(simon): Are we fetching too quickly? Take a break.
+		if response.StatusCode == http.StatusTooManyRequests {
+			response.Body.Close()
+
+			var waitDuration time.Duration
+			var retryErr error
+
+			// NOTE(simon): Try to parse the Retry-After header.
+			if retryAfter := response.Header["Retry-After"]; len(retryAfter) > 0 {
+				retryAfter := retryAfter[0]
+
+				// NOTE(simon): Try to parse it as a duration.
+				waitDuration, retryErr = time.ParseDuration(retryAfter + "s")
+
+				if retryErr != nil {
+					// NOTE(simon): Try to parse it as a specific date.
+					retryDate, retryErr := http.ParseTime(retryAfter)
+					if retryErr == nil {
+						waitDuration = time.Until(retryDate)
+					}
+				}
+			} else {
+				retryErr = fmt.Errorf("Header is not present")
+			}
+
+			// NOTE(simon): We somehow failed to parse the date, use exponential backoff.
+			if retryErr != nil {
+				// NOTE(simon): Arbitrary decision to abort after 5 failed attempts of exponential backoff.
+				if exponentialBackoffTries > 5 {
+					err = fmt.Errorf("Received %v after %v attempts of exponential backoff", response.Status, exponentialBackoffTries)
+					return
+				}
+
+				waitDuration = exponentialBackoffBase * (1 << exponentialBackoffTries)
+				exponentialBackoffTries += 1
+				log.Printf("Received %v but failed to parse Retry-After header: %v. Using exponential backoff of %v.\n", response.Status, retryErr, waitDuration)
+			} else {
+				log.Printf("Received %v, waiting %v.\n", response.Status, waitDuration)
+			}
+
+			// NOTE(simon): Wait and then retry the same request again.
+			time.Sleep(waitDuration)
+			continue
+		} else if response.StatusCode != http.StatusOK {
+			err = fmt.Errorf("GET %v", response.Status)
+			return
+		}
+
+		// NOTE(simon): We got a response! Reset backoff time in the hopes of faster answers.
+		exponentialBackoffTries = 0
+
+		// NOTE(simon): Parse format, just an array of records, which is an
+		// array of fields.
+		var records [][]string
+		err = json.NewDecoder(response.Body).Decode(&records)
+		if err != nil {
+			return
+		}
+		response.Body.Close()
+
+		recordCount := len(records)
+
+		// NOTE(simon): We need at least two lines to continue: The header, and
+		// at least one record.
+		if recordCount < 2 {
+			break
+		}
+
+		// NOTE(simon): Parse resume key if we have one. It is identified by
+		// the second last record being empty and the last one containing the
+		// resume key.
+		resumeKey := ""
+		hasResumeKey := len(records[recordCount - 2]) == 0 && len(records[recordCount - 1]) == 1
+		if hasResumeKey {
+			resumeKey = records[recordCount - 1][0]
+			recordCount -= 2
+		}
+
+		// NOTE(simon): Parse records, the first line has a header with field
+		// names, skip it and the footer with the resume key.
+		for _, line := range records[1:recordCount] {
+			// NOTE(simon): We expect two items per line.
+			if len(line) < 2 {
+				continue
+			}
+
+			date     := line[0]
+			mimetype := line[1]
+
+			// NOTE(simon): Do we have a valid mimetype?
+			if strings.Contains(mimetype, "application/xml") || strings.Contains(mimetype, "application/rss") {
+				snapshots = append(snapshots, WaybackSnapshot{
+					Url: feedUrl,
+					Date: date,
+				})
+			}
+		}
+
+		// NOTE(simon): Update query paramters if we have a resume key,
+		// otherwise we are done.
+		if resumeKey != "" {
+			query.Set("resumeKey", resumeKey)
+		} else {
+			break
+		}
+	}
 
 	return
 }
@@ -353,6 +521,8 @@ type Config struct {
 var config     Config
 var allFeeds   sync.Map
 var allEntries sync.Map
+var allWaybackSnapshots []WaybackSnapshot
+var waybackSnapshotLock sync.Mutex
 
 func jsonFromFeeds() ([]byte, error) {
 	// NOTE(simon): Collect all feeds.
@@ -376,35 +546,13 @@ func jsonFromEntries() ([]byte, error) {
 	return json.Marshal(entries)
 }
 
-func updateFeed(url string) {
-	response, changed, err := pollUrl(url)
-	if err != nil {
-		log.Printf("ERROR %v: %v\n", url, err)
-		return
-	}
-	defer response.Body.Close()
-
-	// NOTE(simon): If nothing changed, we are done!
-	if !changed {
-		return
-	}
-
-	newFeed, newEntries, err := parseFeed(response, url)
-	if err != nil {
-		log.Printf("ERROR %v: %v\n", url, err)
-		return
-	}
-
-	// NOTE(simon): If nothing changed, we are done!
-	if !changed {
-		return
-	}
-
+func storeFeed(feed Feed, entries []Entry) {
 	// NOTE(simon): Update stores.
-	allFeeds.Store(newFeed.Id, newFeed)
+	// TODO(simon): Only do this if the date is newer.
+	allFeeds.Store(feed.Id, feed)
 
 	// NOTE(simon): Update entries.
-	for _, newEntry := range newEntries {
+	for _, newEntry := range entries {
 		updateEntry := true
 
 		// NOTE(simon): Merge with existing entry (keep the publish date).
@@ -419,6 +567,27 @@ func updateFeed(url string) {
 			allEntries.Store(newEntry.Id, newEntry)
 		}
 	}
+}
+
+func updateFeed(url string) {
+	response, changed, err := pollUrl(url)
+	if err != nil {
+		log.Printf("ERROR %v: %v\n", url, err)
+		return
+	}
+	defer response.Body.Close()
+
+	// NOTE(simon): If nothing changed, we are done!
+	if !changed {
+		return
+	}
+
+	feed, entries, err := parseFeed(response, url)
+	if err != nil {
+		log.Printf("ERROR %v: %v\n", url, err)
+	}
+
+	storeFeed(feed, entries)
 }
 
 func atomicWriteFile(file string, data []byte) (err error) {
@@ -446,48 +615,101 @@ func atomicWriteFile(file string, data []byte) (err error) {
 	return
 }
 
-func update() {
-	updateFeedsTick := time.Tick(24 * time.Hour)
+func updateFeeds() {
+	log.Println("INFO: Updating feeds")
+	beforeUpdate := time.Now()
 
-	for range updateFeedsTick {
-		log.Println("INFO: Updating feeds")
-		beforeUpdate := time.Now()
+	// NOTE(simon): Dispatch updates to all feeds.
+	var wg sync.WaitGroup
+	for _, feedInstance := range allFeeds.Range {
+		feed := feedInstance.(Feed)
 
-		// NOTE(simon): Dispatch updates to all feeds.
-		var wg sync.WaitGroup
-		for _, feedInstance := range allFeeds.Range {
-			feed := feedInstance.(Feed)
-
-			wg.Add(1)
-			go func(link string) {
-				defer wg.Done()
-				updateFeed(link)
-			}(feed.Link)
-		}
-
-		wg.Wait()
-
-		// NOTE(simon): Serialize to disk.
-		encodedFeeds,   feedsErr   := jsonFromFeeds()
-		encodedEntries, entriesErr := jsonFromEntries()
-		if feedsErr == nil {
-			feedsErr = atomicWriteFile(filepath.Join(config.OutputDirectory, "feeds.json"), encodedFeeds)
-			if feedsErr == nil && entriesErr == nil {
-				feedsErr = atomicWriteFile(filepath.Join(config.OutputDirectory, "entries.json"), encodedEntries)
-			}
-		}
-
-		if feedsErr != nil {
-			log.Printf("ERROR: Could not save feeds: %v\n", feedsErr)
-		}
-		if entriesErr != nil {
-			log.Printf("ERROR: Could not save entries: %v\n", entriesErr)
-		}
-
-		log.Printf("INFO: Feed updated finished: %s\n", time.Since(beforeUpdate))
+		wg.Add(1)
+		go func(link string) {
+			defer wg.Done()
+			updateFeed(link)
+		}(feed.Link)
 	}
+
+	wg.Wait()
+
+	// NOTE(simon): Serialize to disk.
+	encodedFeeds,   feedsErr   := jsonFromFeeds()
+	encodedEntries, entriesErr := jsonFromEntries()
+	if feedsErr == nil {
+		feedsErr = atomicWriteFile(filepath.Join(config.OutputDirectory, "feeds.json"), encodedFeeds)
+		if feedsErr == nil && entriesErr == nil {
+			feedsErr = atomicWriteFile(filepath.Join(config.OutputDirectory, "entries.json"), encodedEntries)
+		}
+	}
+
+	if feedsErr != nil {
+		log.Printf("ERROR: Could not save feeds: %v\n", feedsErr)
+	}
+	if entriesErr != nil {
+		log.Printf("ERROR: Could not save entries: %v\n", entriesErr)
+	}
+
+	log.Printf("INFO: Feed updated finished: %s\n", time.Since(beforeUpdate))
 }
 
+func fetchWaybackEntry() {
+	// NOTE(simon): Pop the latest snapshot.
+	var snapshot WaybackSnapshot
+	waybackSnapshotLock.Lock()
+	snapshotCount := len(allWaybackSnapshots)
+	if snapshotCount > 0 {
+		snapshot = allWaybackSnapshots[snapshotCount - 1]
+		allWaybackSnapshots = allWaybackSnapshots[:snapshotCount - 1]
+	}
+	waybackSnapshotLock.Unlock()
+
+	// NOTE(simon): No snapshots left? Quit
+	if snapshot.Date == "" {
+		return
+	}
+
+	log.Printf("Fetching snapshot %v@%v\n", snapshot.Url, snapshot.Date)
+
+	response, err := fetchWaybackSnapshot(snapshot)
+
+	// NOTE(simon): We failed to fetch the entry, requeue it for later processing.
+	if err != nil {
+		log.Printf("ERROR %v (%v): %v\n", snapshot.Url, snapshot.Date, err)
+		waybackSnapshotLock.Lock()
+		i, _ := slices.BinarySearchFunc(allWaybackSnapshots, snapshot, func (a, b WaybackSnapshot) int {
+			return strings.Compare(a.Date, b.Date)
+		})
+		allWaybackSnapshots = slices.Insert(allWaybackSnapshots, i, snapshot)
+		waybackSnapshotLock.Unlock()
+		return
+	}
+	defer response.Body.Close()
+
+	feed, entries, err := parseFeed(response, snapshot.Url)
+
+	// NOTE(simon): Failing to parse historic entries cannot be recovered.
+	if err != nil {
+		log.Printf("ERROR %v@%v: %v\n", snapshot.Url, snapshot.Date, err)
+		return
+	}
+
+	storeFeed(feed, entries)
+}
+
+func update() {
+	updateFeedsTick       := time.Tick(24 * time.Hour)
+	fetchWaybackEntryTick := time.Tick(30 * time.Second)
+
+	for {
+		select {
+		case <- updateFeedsTick:
+			updateFeeds()
+		case <- fetchWaybackEntryTick:
+			fetchWaybackEntry()
+		}
+	}
+}
 
 
 
@@ -546,35 +768,6 @@ func main() {
 	// NOTE(simon): Configure the logger to give more accurate timing information.
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
 
-	// feedUrl := "https://fgiesen.wordpress.com/feed/"
-	// feedUrl := "https://nullprogram.com/feed/"
-	feedUrl := "https://probablydance.com/feed/"
-	dates, err := queryWaybackSnapshotDates(feedUrl)
-	if err != nil {
-		log.Fatal(err)
-	}
-	log.Printf("Found %v snapshots\n", len(dates))
-	entries := make(map[string]Entry)
-	for _, date := range dates {
-		log.Printf("Fetching snapshot %v\n", date)
-		response, err := fetchWaybackFeed(feedUrl, date)
-		if err != nil {
-			log.Println(err)
-			continue
-		}
-
-		_, newEntries, err := parseFeed(response, feedUrl)
-		if err != nil {
-			log.Println(err)
-			continue
-		}
-		for _, entry := range newEntries {
-			entries[entry.Id] = entry
-		}
-	}
-	log.Println(entries)
-	return
-
 	// NOTE(simon): Parse command line arguments.
 	reload := flag.Bool("reload", false, "reload static files on page refresh")
 	flag.Parse()
@@ -620,6 +813,40 @@ func main() {
 		go updateFeed(link)
 	}
 
+	go func () {
+		for _, link := range config.Urls {
+			log.Printf("Fetching snapshots for %v\n", link)
+			snapshots, err := queryWaybackSnapshots(link)
+			if err != nil {
+				log.Printf("ERROR %v: Failed to fetch snapshots %v\n", link, err)
+				continue
+			}
+
+			slices.SortFunc(snapshots, func (a, b WaybackSnapshot) int {
+				return strings.Compare(a.Date, b.Date)
+			})
+
+			waybackSnapshotLock.Lock()
+			merged := []WaybackSnapshot{}
+			i, j := 0, 0
+			for i < len(allWaybackSnapshots) && j < len(snapshots) {
+				if allWaybackSnapshots[i].Date < snapshots[j].Date {
+					merged = append(merged, allWaybackSnapshots[i])
+					i += 1
+				} else {
+					merged = append(merged, snapshots[j])
+					j += 1
+				}
+			}
+
+			merged = append(merged, allWaybackSnapshots[i:]...)
+			merged = append(merged, snapshots[j:]...)
+
+			allWaybackSnapshots = merged
+			waybackSnapshotLock.Unlock()
+		}
+	}()
+
 	// NOTE(simon): Start feed update process.
 	go update()
 
@@ -642,156 +869,4 @@ func main() {
 	if err := http.ListenAndServe(address, middlewareLogging(log.Default(), http.DefaultServeMux)); err != nil {
 		log.Fatal(err)
 	}
-}
-
-func fetchWaybackFeed(feedUrl, date string) (response *http.Response, err error) {
-	// TODO(simon): Set user agent
-	// TODO(simon): Honor 429 Too Many Requests and Retry-After
-	response, err = http.Get("https://web.archive.org/web/" + date + "id_/" + feedUrl)
-	return
-}
-
-func queryWaybackSnapshotDates(feedUrl string) (dates []string, err error) {
-	// NOTE(simon): Always valid so skip the error.
-	requestUrl, _ := url.Parse("http://web.archive.org/cdx/search/cdx")
-
-	// NOTE(simon): Filtering on mimetypes was problematic during testing, so
-	// we avoid it. I could not get it to filter for multiple mimetypes
-	// simultaneously, and only filtering for one would require us to do more
-	// queries. Better to do it ourselves.
-	query := url.Values{}
-	query.Set("fl", "timestamp,mimetype")
-	query.Add("filter", "statuscode:200")
-	query.Set("showResumeKey", "true")
-	query.Set("output", "json")
-	query.Set("url", feedUrl)
-
-	exponentialBackoffBase  := 1 * time.Minute
-	exponentialBackoffTries := 0
-
-	for {
-		// NOTE(simon): Setup request with custom headers.
-		requestUrl.RawQuery = query.Encode()
-
-		var request *http.Request
-		request, err = http.NewRequest("GET", requestUrl.String(), nil)
-		if err != nil {
-			return
-		}
-
-		request.Header.Set("User-Agent", "SilverFeed/1.0")
-
-		// NOTE(simon): Issue request with query.
-		var response *http.Response
-		response, err = http.DefaultClient.Do(request)
-		if err != nil {
-			return
-		}
-		defer response.Body.Close()
-
-		// NOTE(simon): Are we fetching too quickly? Take a break.
-		if response.StatusCode == http.StatusTooManyRequests {
-			response.Body.Close()
-
-			var waitDuration time.Duration
-			var retryErr error
-
-			// NOTE(simon): Try to parse the Retry-After header.
-			if retryAfter := response.Header["Retry-After"]; len(retryAfter) > 0 {
-				retryAfter := retryAfter[0]
-
-				// NOTE(simon): Try to parse it as a duration.
-				waitDuration, retryErr = time.ParseDuration(retryAfter + "s")
-
-				if retryErr != nil {
-					// NOTE(simon): Try to parse it as a specific date.
-					retryDate, retryErr := http.ParseTime(retryAfter)
-					if retryErr == nil {
-						waitDuration = time.Until(retryDate)
-					}
-				}
-			} else {
-				retryErr = fmt.Errorf("Header is not present")
-			}
-
-			// NOTE(simon): We somehow failed to parse the date, use exponential backoff.
-			if retryErr != nil {
-				// NOTE(simon): Arbitrary decision to abort after 5 failed attempts of exponential backoff.
-				if exponentialBackoffTries > 5 {
-					err = fmt.Errorf("Received %v after %v attempts of exponential backoff", response.Status, exponentialBackoffTries)
-					return
-				}
-
-				waitDuration = exponentialBackoffBase * (1 << exponentialBackoffTries)
-				exponentialBackoffTries += 1
-				log.Printf("Received %v but failed to parse Retry-After header: %v. Using exponential backoff of %v.\n", response.Status, retryErr, waitDuration)
-			} else {
-				log.Printf("Received %v, waiting %v.\n", response.Status, waitDuration)
-			}
-
-			// NOTE(simon): Wait and then retry the same request again.
-			time.Sleep(waitDuration)
-			continue
-		} else if response.StatusCode != http.StatusOK {
-			err = fmt.Errorf("GET %v", response.Status)
-			return
-		}
-
-		// NOTE(simon): We got a response! Reset backoff time in the hopes of faster answers.
-		exponentialBackoffTries = 0
-
-		// NOTE(simon): Parse format, just an array of records, which is an
-		// array of fields.
-		var records [][]string
-		err = json.NewDecoder(response.Body).Decode(&records)
-		if err != nil {
-			return
-		}
-		response.Body.Close()
-
-		recordCount := len(records)
-
-		// NOTE(simon): We need at least two lines to continue: The header, and
-		// at least one record.
-		if recordCount < 2 {
-			break
-		}
-
-		// NOTE(simon): Parse resume key if we have one. It is identified by
-		// the second last record being empty and the last one containing the
-		// resume key.
-		resumeKey := ""
-		hasResumeKey := len(records[recordCount - 2]) == 0 && len(records[recordCount - 1]) == 1
-		if hasResumeKey {
-			resumeKey = records[recordCount - 1][0]
-			recordCount -= 2
-		}
-
-		// NOTE(simon): Parse records, the first line has a header with field
-		// names, skip it and the footer with the resume key.
-		for _, line := range records[1:recordCount] {
-			// NOTE(simon): We expect two items per line.
-			if len(line) < 2 {
-				continue
-			}
-
-			date     := line[0]
-			mimetype := line[1]
-
-			// NOTE(simon): Do we have a valid mimetype?
-			if strings.Contains(mimetype, "application/xml") || strings.Contains(mimetype, "application/rss") {
-				dates = append(dates, date)
-			}
-		}
-
-		// NOTE(simon): Update query paramters if we have a resume key,
-		// otherwise we are done.
-		if resumeKey != "" {
-			query.Set("resumeKey", resumeKey)
-		} else {
-			break
-		}
-	}
-
-	return
 }
