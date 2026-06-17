@@ -518,7 +518,6 @@ type Config struct {
 	OutputDirectory string
 }
 
-var config     Config
 var allFeeds   sync.Map
 var allEntries sync.Map
 var allWaybackSnapshots []WaybackSnapshot
@@ -615,7 +614,7 @@ func atomicWriteFile(file string, data []byte) (err error) {
 	return
 }
 
-func updateFeeds() {
+func updateFeeds(config Config) {
 	log.Println("INFO: Updating feeds")
 	beforeUpdate := time.Now()
 
@@ -697,14 +696,14 @@ func fetchWaybackEntry() {
 	storeFeed(feed, entries)
 }
 
-func update() {
+func update(config Config) {
 	updateFeedsTick       := time.Tick(24 * time.Hour)
 	fetchWaybackEntryTick := time.Tick(30 * time.Second)
 
 	for {
 		select {
 		case <- updateFeedsTick:
-			updateFeeds()
+			updateFeeds(config)
 		case <- fetchWaybackEntryTick:
 			fetchWaybackEntry()
 		}
@@ -749,19 +748,23 @@ func middlewareLogging(logger *log.Logger, next http.Handler) http.Handler {
 	})
 }
 
-func readConfig() {
+func readConfig() (Config, error) {
 	configContent, err := os.ReadFile("config.json")
 	if err != nil {
-		log.Fatal(err)
+		return Config{}, fmt.Errorf("read file: %w", err)
 	}
+
+	config := Config{}
 	if err := json.Unmarshal(configContent, &config); err != nil {
-		log.Fatal(err)
+		return Config{}, fmt.Errorf("json unmarshal: %w", err)
 	}
 
 	// Validate and set defaults.
 	if config.Port == 0 {
 		config.Port = 8080
 	}
+
+	return config, nil
 }
 
 func main() {
@@ -772,7 +775,10 @@ func main() {
 	reload := flag.Bool("reload", false, "reload static files on page refresh")
 	flag.Parse()
 
-	readConfig()
+	config, err := readConfig()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	// NOTE(simon): Ensure that the output directory exists.
 	if config.OutputDirectory != "" {
@@ -848,7 +854,7 @@ func main() {
 	}()
 
 	// NOTE(simon): Start feed update process.
-	go update()
+	go update(config)
 
 	// NOTE(simon): Setup handler for reloading of static files
 	var staticHandler http.Handler
