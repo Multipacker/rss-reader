@@ -568,25 +568,25 @@ func storeFeed(feed Feed, entries []Entry) {
 	}
 }
 
-func updateFeed(url string) {
+func updateFeed(url string) error {
 	response, changed, err := pollUrl(url)
 	if err != nil {
-		log.Printf("ERROR %v: %v\n", url, err)
-		return
+		return fmt.Errorf("poll url: %w", err)
 	}
 	defer response.Body.Close()
 
 	// NOTE(simon): If nothing changed, we are done!
 	if !changed {
-		return
+		return nil
 	}
 
 	feed, entries, err := parseFeed(response, url)
 	if err != nil {
-		log.Printf("ERROR %v: %v\n", url, err)
+		return fmt.Errorf("parse feed: %w", err)
 	}
 
 	storeFeed(feed, entries)
+	return nil
 }
 
 func atomicWriteFile(file string, data []byte) (err error) {
@@ -626,7 +626,10 @@ func updateFeeds(config Config) {
 		wg.Add(1)
 		go func(link string) {
 			defer wg.Done()
-			updateFeed(link)
+			err := updateFeed(link)
+			if err != nil {
+				log.Println(err)
+			}
 		}(feed.Link)
 	}
 
