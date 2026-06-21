@@ -3,19 +3,20 @@ package main
 import (
 	"embed"
 	"encoding/json"
-	"encoding/xml"
 	"flag"
 	"fmt"
 	"io/fs"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 	"time"
+
+	"Multipacker/rss-reader/internal/feedparse"
+	"Multipacker/rss-reader/internal/wayback"
 )
 
 
@@ -94,446 +95,21 @@ func pollUrl(url string) (response *http.Response, changed bool, err error) {
 	return
 }
 
-type WaybackSnapshot struct {
-	Url  string
-	Date string
-}
 
-func fetchWaybackSnapshot(snapshot WaybackSnapshot) (response *http.Response, err error) {
-	// TODO(simon): Honor 429 Too Many Requests and Retry-After
 
-	request, err := http.NewRequest("GET", "https://web.archive.org/web/" + snapshot.Date + "id_/" + snapshot.Url, nil)
-	if err != nil {
-		return
-	}
-
-	request.Header.Set("User-Agent", "SilverFeed/1.0")
-
-	response, err = http.DefaultClient.Do(request)
-	return
-}
-
-func queryWaybackSnapshots(feedUrl string, lastPollTime time.Time) (snapshots []WaybackSnapshot, err error) {
-	waybackFormat := "20060102030405"
-
-	// NOTE(simon): Always valid so skip the error.
-	requestUrl, _ := url.Parse("http://web.archive.org/cdx/search/cdx")
-
-	// NOTE(simon): Filtering on mimetypes was problematic during testing, so
-	// we avoid it. I could not get it to filter for multiple mimetypes
-	// simultaneously, and only filtering for one would require us to do more
-	// queries. Better to do it ourselves.
-	query := url.Values{}
-	query.Set("fl", "timestamp,mimetype")
-	query.Add("filter", "statuscode:200")
-	query.Set("showResumeKey", "true")
-	query.Set("output", "json")
-	query.Set("url", feedUrl)
-	if !lastPollTime.IsZero() {
-		query.Set("from", lastPollTime.UTC().Format(waybackFormat))
-	}
-
-	exponentialBackoffBase  := 1 * time.Minute
-	exponentialBackoffTries := 0
-
-	for {
-		// NOTE(simon): Setup request with custom headers.
-		requestUrl.RawQuery = query.Encode()
-
-		var request *http.Request
-		request, err = http.NewRequest("GET", requestUrl.String(), nil)
-		if err != nil {
-			return
-		}
-
-		request.Header.Set("User-Agent", "SilverFeed/1.0")
-
-		// NOTE(simon): Issue request with query.
-		var response *http.Response
-		response, err = http.DefaultClient.Do(request)
-		if err != nil {
-			return
-		}
-		defer response.Body.Close()
-
-		// NOTE(simon): Are we fetching too quickly? Take a break.
-		if response.StatusCode == http.StatusTooManyRequests {
-			response.Body.Close()
-
-			var waitDuration time.Duration
-			var retryErr error
-
-			// NOTE(simon): Try to parse the Retry-After header.
-			if retryAfter := response.Header["Retry-After"]; len(retryAfter) > 0 {
-				retryAfter := retryAfter[0]
-
-				// NOTE(simon): Try to parse it as a duration.
-				waitDuration, retryErr = time.ParseDuration(retryAfter + "s")
-
-				if retryErr != nil {
-					// NOTE(simon): Try to parse it as a specific date.
-					retryDate, retryErr := http.ParseTime(retryAfter)
-					if retryErr == nil {
-						waitDuration = time.Until(retryDate)
-					}
-				}
-			} else {
-				retryErr = fmt.Errorf("Header is not present")
-			}
-
-			// NOTE(simon): We somehow failed to parse the date, use exponential backoff.
-			if retryErr != nil {
-				// NOTE(simon): Arbitrary decision to abort after 5 failed attempts of exponential backoff.
-				if exponentialBackoffTries > 5 {
-					err = fmt.Errorf("Received %v after %v attempts of exponential backoff", response.Status, exponentialBackoffTries)
-					return
-				}
-
-				waitDuration = exponentialBackoffBase * (1 << exponentialBackoffTries)
-				exponentialBackoffTries += 1
-				log.Printf("Received %v but failed to parse Retry-After header: %v. Using exponential backoff of %v.\n", response.Status, retryErr, waitDuration)
-			} else {
-				log.Printf("Received %v, waiting %v.\n", response.Status, waitDuration)
-			}
-
-			// NOTE(simon): Wait and then retry the same request again.
-			time.Sleep(waitDuration)
-			continue
-		} else if response.StatusCode != http.StatusOK {
-			err = fmt.Errorf("GET %v", response.Status)
-			return
-		}
-
-		// NOTE(simon): We got a response! Reset backoff time in the hopes of faster answers.
-		exponentialBackoffTries = 0
-
-		// NOTE(simon): Parse format, just an array of records, which is an
-		// array of fields.
-		var records [][]string
-		err = json.NewDecoder(response.Body).Decode(&records)
-		if err != nil {
-			return
-		}
-		response.Body.Close()
-
-		recordCount := len(records)
-
-		// NOTE(simon): We need at least two lines to continue: The header, and
-		// at least one record.
-		if recordCount < 2 {
-			break
-		}
-
-		// NOTE(simon): Parse resume key if we have one. It is identified by
-		// the second last record being empty and the last one containing the
-		// resume key.
-		resumeKey := ""
-		hasResumeKey := len(records[recordCount - 2]) == 0 && len(records[recordCount - 1]) == 1
-		if hasResumeKey {
-			resumeKey = records[recordCount - 1][0]
-			recordCount -= 2
-		}
-
-		// NOTE(simon): Parse records, the first line has a header with field
-		// names, skip it and the footer with the resume key.
-		for _, line := range records[1:recordCount] {
-			// NOTE(simon): We expect two items per line.
-			if len(line) < 2 {
-				continue
-			}
-
-			date     := line[0]
-			mimetype := line[1]
-
-			// NOTE(simon): Do we have a valid mimetype?
-			if strings.Contains(mimetype, "application/xml") || strings.Contains(mimetype, "application/rss") {
-				snapshots = append(snapshots, WaybackSnapshot{
-					Url: feedUrl,
-					Date: date,
-				})
-			}
-		}
-
-		// NOTE(simon): Update query paramters if we have a resume key,
-		// otherwise we are done.
-		if resumeKey != "" {
-			query.Set("resumeKey", resumeKey)
-		} else {
-			break
-		}
-	}
-
-	return
-}
-
-
-
-type Entry struct {
-	Id        string    `json:"id"`
-	Feed      string    `json:"feed"`
-	Title     string    `json:"title"`
-	Published time.Time `json:"published"`
-	Updated   time.Time `json:"updated"`
-	Link      string    `json:"link"`
-}
-
-type Feed struct {
-	Id          string    `json:"id"`
-	Title       string    `json:"title"`
-	Description string    `json:"description"`
-	Link        string    `json:"link"`
-	Updated     time.Time `json:"updated"`
-}
-
-func parseRssDateOrNow(raw string) time.Time {
-	// NOTE(simon): Early out on empty dates.
-	if raw == "" {
-		return time.Now()
-	}
-
-	// NOTE(simon): Trim anything before and including the first comma.
-	firstComma := strings.IndexRune(raw, ',')
-	if firstComma != -1 {
-		raw = strings.TrimSpace(raw[firstComma + 1:])
-	}
-
-	// NOTE(simon): Try to parse a few common date formats.
-	formats := []string{
-		"02 Jan 2006 15:04:05 MST",
-		"02 Jan 2006 15:04:05 -0700",
-		"02 Jan 06 15:04:05 MST",
-		"02 Jan 06 15:04:05 -0700",
-		"2 Jan 2006 15:04:05 MST",
-		"2 Jan 2006 15:04:05 -0700",
-		"2 Jan 06 15:04:05 MST",
-		"2 Jan 06 15:04:05 -0700",
-	}
-
-	for _, format := range formats {
-		parsed, err := time.Parse(format, raw)
-		if err != nil {
-			continue
-		}
-
-		if parsed.Before(time.Now()) {
-			return parsed
-		}
-	}
-
-	log.Printf("ERROR: Failed to parse \"%v\" as a RSS date", raw)
-
-	return time.Now()
-}
-
-func parseAtomDateOrNow(raw string) time.Time {
-	// NOTE(simon): Early out on empty dates.
-	if raw == "" {
-		return time.Now()
-	}
-
-	formats := []string{
-		time.RFC3339,
-	}
-
-	for _, format := range formats {
-		parsed, err := time.Parse(format, raw)
-		if err != nil {
-			continue
-		}
-
-		if parsed.Before(time.Now()) {
-			return parsed
-		}
-	}
-
-	log.Printf("ERROR: Failed to parse \"%v\" as an Atom date", raw)
-
-	return time.Now()
-}
-
-func parseFeed(response *http.Response, url string) (feed Feed, entries []Entry, err error) {
-	// NOTE(simon): On a bad response we just skip this URL.
-	if response.StatusCode != http.StatusOK {
-		err = fmt.Errorf("GET %v", response.Status)
-		return
-	}
-
-	decoder := xml.NewDecoder(response.Body)
-
-	// NOTE(simon): Find the first start element to determine the kind of feed we have.
-	var startToken xml.StartElement
-	for startToken.Name.Local == "" {
-		var token xml.Token
-		token, err = decoder.Token()
-
-		if err != nil {
-			return
-		}
-
-		switch token := token.(type) {
-		case xml.StartElement:
-			startToken = token
-		}
-	}
-
-	// NOTE(simon): Parse the feed based on startToken.
-	switch startToken.Name.Local {
-	case "rss":
-		type RssItem struct {
-			XMLName xml.Name `xml:"item"`
-			Title   string   `xml:"title"`
-			Link    string   `xml:"link"`
-			Guid    string   `xml:"guid"`
-			PubDate string   `xml:"pubDate"`
-		}
-
-		type RssLink struct {
-			XMLName  xml.Name `xml:"link"`
-			Href     string   `xml:"href,attr"`
-			Rel      string   `xml:"rel,attr"`
-			Chardata string   `xml:",chardata"`
-		}
-
-		type RssFeed struct {
-			XMLName       xml.Name  `xml:"rss"`
-			Title         string    `xml:"channel>title"`
-			Description   string    `xml:"channel>description"`
-			LastBuildDate string    `xml:"channel>lastBuildDate"`
-			Links         []RssLink `xml:"channel>link"`
-			Items         []RssItem `xml:"channel>item"`
-		}
-
-		// NOTE(simon): Attempt to parse the feed.
-		var rssFeed RssFeed
-		err = decoder.DecodeElement(&rssFeed, &startToken)
-		if err != nil {
-			return
-		}
-
-		// NOTE(simon): Restructure to our internal format.
-		feed.Title       = rssFeed.Title
-		feed.Description = rssFeed.Description
-		feed.Updated     = parseRssDateOrNow(rssFeed.LastBuildDate)
-		feed.Link        = url
-		for _, link := range rssFeed.Links {
-			if link.Rel == "self" {
-				feed.Link = link.Href
-				break
-			}
-		}
-		feed.Id = feed.Link
-
-		for _, item := range rssFeed.Items {
-			var entry Entry
-			entry.Feed  = feed.Id
-			entry.Title = item.Title
-			entry.Link  = item.Link
-			if item.Guid != "" {
-				entry.Id = item.Guid
-			} else {
-				entry.Id = entry.Link
-			}
-			entry.Published = parseRssDateOrNow(item.PubDate)
-			entry.Updated   = entry.Published
-
-			entries = append(entries, entry)
-		}
-	case "feed":
-		type AtomLink struct {
-			XMLName  xml.Name `xml:"link"`
-			Href     string   `xml:"href,attr"`
-			Rel      string   `xml:"rel,attr"`
-			Chardata string   `xml:",chardata"`
-		}
-
-		type AtomEntry struct {
-			XMLName   xml.Name   `xml:"entry"`
-			Title     string     `xml:"title"`
-			Id        string     `xml:"id"`
-			Published string     `xml:"published"`
-			Updated   string     `xml:"updated"`
-			Links     []AtomLink `xml:"link"`
-		}
-
-		type AtomFeed struct {
-			XMLName  xml.Name    `xml:"feed"`
-			Title    string      `xml:"title"`
-			Subtitle string      `xml:"subtitle"`
-			Id       string      `xml:"id"`
-			Links    []AtomLink  `xml:"link"`
-			Updated  string      `xml:"updated"`
-			Entries  []AtomEntry `xml:"entry"`
-		}
-
-		// NOTE(simon): Attempt to parse the feed.
-		var atomFeed AtomFeed
-		err = decoder.DecodeElement(&atomFeed, &startToken)
-		if err != nil {
-			return
-		}
-
-		// NOTE(simon): Restructure to our internal format.
-		feed.Title       = atomFeed.Title
-		feed.Description = atomFeed.Subtitle
-		feed.Id          = atomFeed.Id
-		feed.Link        = url
-		for _, link := range atomFeed.Links {
-			if link.Rel == "self" {
-				feed.Link = link.Href
-				break
-			}
-		}
-		feed.Updated = parseAtomDateOrNow(atomFeed.Updated)
-
-		for _, atomEntry := range atomFeed.Entries {
-			var entry Entry
-			entry.Feed = feed.Id
-			entry.Title = atomEntry.Title
-			entry.Id    = atomEntry.Id
-			for _, link := range atomEntry.Links {
-				if link.Rel == "alternate" || link.Rel == "" {
-					entry.Link = link.Href
-					break
-				}
-			}
-
-			entry.Updated = parseAtomDateOrNow(atomEntry.Updated)
-			if atomEntry.Published == "" {
-				entry.Published = entry.Updated
-			} else {
-				entry.Published = parseAtomDateOrNow(atomEntry.Published)
-			}
-
-			entries = append(entries, entry)
-		}
-	default:
-		err = fmt.Errorf("Unknown feed type \"%v\"\n", startToken.Name.Local)
-		return
-	}
-
-	return
-}
-
-
-
-type Config struct {
-	Host            string
-	Port            int
-	Urls            []string
-	OutputDirectory string
-}
-
-var allFeeds   sync.Map
-var allEntries sync.Map
-var allWaybackSnapshots []WaybackSnapshot
-var waybackSnapshotPoints map[string]time.Time
-var waybackSnapshotLock sync.Mutex
+var (
+	allFeeds   sync.Map
+	allEntries sync.Map
+	allWaybackSnapshots []wayback.Snapshot
+	waybackSnapshotPoints map[string]time.Time
+	waybackSnapshotLock sync.Mutex
+)
 
 func jsonFromFeeds() ([]byte, error) {
 	// NOTE(simon): Collect all feeds.
-	var feeds []Feed
+	var feeds []feedparse.Feed
 	for _, feedInstance := range allFeeds.Range {
-		feed := feedInstance.(Feed)
+		feed := feedInstance.(feedparse.Feed)
 		feeds = append(feeds, feed)
 	}
 
@@ -542,9 +118,9 @@ func jsonFromFeeds() ([]byte, error) {
 
 func jsonFromEntries() ([]byte, error) {
 	// NOTE(simon): Collect all entries.
-	var entries []Entry
+	var entries []feedparse.Entry
 	for _, entryInstance := range allEntries.Range {
-		entry := entryInstance.(Entry)
+		entry := entryInstance.(feedparse.Entry)
 		entries = append(entries, entry)
 	}
 
@@ -567,7 +143,16 @@ func jsonFromSnapshotPoints() ([]byte, error) {
 	return encoded, err
 }
 
-func storeFeed(feed Feed, entries []Entry, config Config) {
+
+
+type Config struct {
+	Host            string
+	Port            int
+	Urls            []string
+	OutputDirectory string
+}
+
+func storeFeed(feed feedparse.Feed, entries []feedparse.Entry, config Config) {
 	// NOTE(simon): Update stores.
 	// TODO(simon): Only do this if the date is newer.
 	allFeeds.Store(feed.Id, feed)
@@ -578,7 +163,7 @@ func storeFeed(feed Feed, entries []Entry, config Config) {
 
 		// NOTE(simon): Merge with existing entry (keep the publish date).
 		if entryInstance, hasEntry := allEntries.Load(newEntry.Id); hasEntry {
-			oldEntry := entryInstance.(Entry)
+			oldEntry := entryInstance.(feedparse.Entry)
 
 			newEntry.Published = oldEntry.Published
 			updateEntry = oldEntry.Updated.Before(newEntry.Updated)
@@ -614,14 +199,19 @@ func updateFeed(url string, config Config) error {
 	}
 	defer response.Body.Close()
 
+	// NOTE(simon): On a bad response we just skip this URL.
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("GET %v", response.Status)
+	}
+
 	// NOTE(simon): If nothing changed, we are done!
 	if !changed {
 		return nil
 	}
 
-	feed, entries, err := parseFeed(response, url)
+	feed, entries, err := feedparse.Parse(response.Body, url)
 	if err != nil {
-		return fmt.Errorf("parse feed: %w", err)
+		return fmt.Errorf("feed parse: %w", err)
 	}
 
 	storeFeed(feed, entries, config)
@@ -661,7 +251,7 @@ func updateFeeds(config Config) {
 	// NOTE(simon): Dispatch updates to all feeds.
 	var wg sync.WaitGroup
 	for _, feedInstance := range allFeeds.Range {
-		feed := feedInstance.(Feed)
+		feed := feedInstance.(feedparse.Feed)
 
 		wg.Add(1)
 		go func(link string) {
@@ -680,7 +270,7 @@ func updateFeeds(config Config) {
 
 func fetchWaybackEntry(config Config) {
 	// NOTE(simon): Pop the latest snapshot.
-	var snapshot WaybackSnapshot
+	var snapshot wayback.Snapshot
 	waybackSnapshotLock.Lock()
 	snapshotCount := len(allWaybackSnapshots)
 	if snapshotCount > 0 {
@@ -696,13 +286,13 @@ func fetchWaybackEntry(config Config) {
 
 	log.Printf("Fetching snapshot %v@%v\n", snapshot.Url, snapshot.Date)
 
-	response, err := fetchWaybackSnapshot(snapshot)
+	response, err := wayback.FetchSnapshot(snapshot.Url, snapshot.Date)
 
 	// NOTE(simon): We failed to fetch the entry, requeue it for later processing.
 	if err != nil {
 		log.Printf("ERROR %v (%v): %v\n", snapshot.Url, snapshot.Date, err)
 		waybackSnapshotLock.Lock()
-		i, _ := slices.BinarySearchFunc(allWaybackSnapshots, snapshot, func (a, b WaybackSnapshot) int {
+		i, _ := slices.BinarySearchFunc(allWaybackSnapshots, snapshot, func (a, b wayback.Snapshot) int {
 			return strings.Compare(a.Date, b.Date)
 		})
 		allWaybackSnapshots = slices.Insert(allWaybackSnapshots, i, snapshot)
@@ -711,7 +301,13 @@ func fetchWaybackEntry(config Config) {
 	}
 	defer response.Body.Close()
 
-	feed, entries, err := parseFeed(response, snapshot.Url)
+	// NOTE(simon): On a bad response we just skip this URL.
+	if response.StatusCode != http.StatusOK {
+		log.Printf("GET %v", response.Status)
+		return
+	}
+
+	feed, entries, err := feedparse.Parse(response.Body, snapshot.Url)
 
 	// NOTE(simon): Failing to parse historic entries cannot be recovered.
 	if err != nil {
@@ -823,7 +419,7 @@ func main() {
 
 	// NOTE(simon): Load old feeds, entries, and snapshots.
 	if feedsContent, err := os.ReadFile(filepath.Join(config.OutputDirectory, "feeds.json")); err == nil {
-		var feeds []Feed
+		var feeds []feedparse.Feed
 		if err := json.Unmarshal(feedsContent, &feeds); err != nil {
 			log.Fatal(err)
 		}
@@ -835,7 +431,7 @@ func main() {
 		log.Fatal(err)
 	}
 	if entriesContent, err := os.ReadFile(filepath.Join(config.OutputDirectory, "entries.json")); err == nil {
-		var entries []Entry
+		var entries []feedparse.Entry
 		if err := json.Unmarshal(entriesContent, &entries); err != nil {
 			log.Fatal(err)
 		}
@@ -847,7 +443,7 @@ func main() {
 		log.Fatal(err)
 	}
 	if snapshotsContent, err := os.ReadFile(filepath.Join(config.OutputDirectory, "snapshots.json")); err == nil {
-		var snapshots []WaybackSnapshot
+		var snapshots []wayback.Snapshot
 		if err := json.Unmarshal(snapshotsContent, &snapshots); err != nil {
 			log.Fatal(err)
 		}
@@ -884,19 +480,19 @@ func main() {
 			waybackSnapshotLock.Unlock()
 
 			log.Printf("Fetching snapshots for %v\n", link)
-			snapshots, err := queryWaybackSnapshots(link, lastPollTime)
+			snapshots, err := wayback.QuerySnapshots(link, lastPollTime)
 			if err != nil {
 				log.Printf("ERROR %v: Failed to fetch snapshots %v\n", link, err)
 				continue
 			}
 			log.Printf("Got %v new snapthots for %v\n", len(snapshots), link)
 
-			slices.SortFunc(snapshots, func (a, b WaybackSnapshot) int {
+			slices.SortFunc(snapshots, func (a, b wayback.Snapshot) int {
 				return strings.Compare(a.Date, b.Date)
 			})
 
 			waybackSnapshotLock.Lock()
-			merged := []WaybackSnapshot{}
+			merged := []wayback.Snapshot{}
 			i, j := 0, 0
 			for i < len(allWaybackSnapshots) && j < len(snapshots) {
 				if allWaybackSnapshots[i].Date < snapshots[j].Date {
