@@ -113,7 +113,9 @@ func fetchWaybackSnapshot(snapshot WaybackSnapshot) (response *http.Response, er
 	return
 }
 
-func queryWaybackSnapshots(feedUrl string) (snapshots []WaybackSnapshot, err error) {
+func queryWaybackSnapshots(feedUrl string, lastPollTime time.Time) (snapshots []WaybackSnapshot, err error) {
+	waybackFormat := "20060102030405"
+
 	// NOTE(simon): Always valid so skip the error.
 	requestUrl, _ := url.Parse("http://web.archive.org/cdx/search/cdx")
 
@@ -127,6 +129,9 @@ func queryWaybackSnapshots(feedUrl string) (snapshots []WaybackSnapshot, err err
 	query.Set("showResumeKey", "true")
 	query.Set("output", "json")
 	query.Set("url", feedUrl)
+	if !lastPollTime.IsZero() {
+		query.Set("from", lastPollTime.UTC().Format(waybackFormat))
+	}
 
 	exponentialBackoffBase  := 1 * time.Minute
 	exponentialBackoffTries := 0
@@ -521,6 +526,7 @@ type Config struct {
 var allFeeds   sync.Map
 var allEntries sync.Map
 var allWaybackSnapshots []WaybackSnapshot
+var waybackSnapshotPoints map[string]time.Time
 var waybackSnapshotLock sync.Mutex
 
 func jsonFromFeeds() ([]byte, error) {
@@ -545,7 +551,23 @@ func jsonFromEntries() ([]byte, error) {
 	return json.Marshal(entries)
 }
 
-func storeFeed(feed Feed, entries []Entry) {
+func jsonFromSnapshots() ([]byte, error) {
+	waybackSnapshotLock.Lock()
+	encoded, err := json.Marshal(allWaybackSnapshots)
+	waybackSnapshotLock.Unlock()
+
+	return encoded, err
+}
+
+func jsonFromSnapshotPoints() ([]byte, error) {
+	waybackSnapshotLock.Lock()
+	encoded, err := json.Marshal(waybackSnapshotPoints)
+	waybackSnapshotLock.Unlock()
+
+	return encoded, err
+}
+
+func storeFeed(feed Feed, entries []Entry, config Config) {
 	// NOTE(simon): Update stores.
 	// TODO(simon): Only do this if the date is newer.
 	allFeeds.Store(feed.Id, feed)
@@ -566,9 +588,26 @@ func storeFeed(feed Feed, entries []Entry) {
 			allEntries.Store(newEntry.Id, newEntry)
 		}
 	}
+
+	// NOTE(simon): Serialize to disk.
+	encodedFeeds,   feedsErr   := jsonFromFeeds()
+	encodedEntries, entriesErr := jsonFromEntries()
+	if feedsErr == nil {
+		feedsErr = atomicWriteFile(filepath.Join(config.OutputDirectory, "feeds.json"), encodedFeeds)
+		if feedsErr == nil && entriesErr == nil {
+			entriesErr = atomicWriteFile(filepath.Join(config.OutputDirectory, "entries.json"), encodedEntries)
+		}
+	}
+
+	if feedsErr != nil {
+		log.Printf("ERROR: Could not save feeds: %v\n", feedsErr)
+	}
+	if entriesErr != nil {
+		log.Printf("ERROR: Could not save entries: %v\n", entriesErr)
+	}
 }
 
-func updateFeed(url string) error {
+func updateFeed(url string, config Config) error {
 	response, changed, err := pollUrl(url)
 	if err != nil {
 		return fmt.Errorf("poll url: %w", err)
@@ -585,7 +624,8 @@ func updateFeed(url string) error {
 		return fmt.Errorf("parse feed: %w", err)
 	}
 
-	storeFeed(feed, entries)
+	storeFeed(feed, entries, config)
+
 	return nil
 }
 
@@ -626,7 +666,7 @@ func updateFeeds(config Config) {
 		wg.Add(1)
 		go func(link string) {
 			defer wg.Done()
-			err := updateFeed(link)
+			err := updateFeed(link, config)
 			if err != nil {
 				log.Println(err)
 			}
@@ -635,27 +675,10 @@ func updateFeeds(config Config) {
 
 	wg.Wait()
 
-	// NOTE(simon): Serialize to disk.
-	encodedFeeds,   feedsErr   := jsonFromFeeds()
-	encodedEntries, entriesErr := jsonFromEntries()
-	if feedsErr == nil {
-		feedsErr = atomicWriteFile(filepath.Join(config.OutputDirectory, "feeds.json"), encodedFeeds)
-		if feedsErr == nil && entriesErr == nil {
-			feedsErr = atomicWriteFile(filepath.Join(config.OutputDirectory, "entries.json"), encodedEntries)
-		}
-	}
-
-	if feedsErr != nil {
-		log.Printf("ERROR: Could not save feeds: %v\n", feedsErr)
-	}
-	if entriesErr != nil {
-		log.Printf("ERROR: Could not save entries: %v\n", entriesErr)
-	}
-
 	log.Printf("INFO: Feed updated finished: %s\n", time.Since(beforeUpdate))
 }
 
-func fetchWaybackEntry() {
+func fetchWaybackEntry(config Config) {
 	// NOTE(simon): Pop the latest snapshot.
 	var snapshot WaybackSnapshot
 	waybackSnapshotLock.Lock()
@@ -696,7 +719,15 @@ func fetchWaybackEntry() {
 		return
 	}
 
-	storeFeed(feed, entries)
+	storeFeed(feed, entries, config)
+
+	encodedSnapshots, snapshotsErr := jsonFromSnapshots()
+	if snapshotsErr == nil {
+		snapshotsErr = atomicWriteFile(filepath.Join(config.OutputDirectory, "snapshots.json"), encodedSnapshots)
+	}
+	if snapshotsErr != nil {
+		log.Printf("ERROR: Could not save snapshots: %v\n", snapshotsErr)
+	}
 }
 
 func update(config Config) {
@@ -708,7 +739,7 @@ func update(config Config) {
 		case <- updateFeedsTick:
 			updateFeeds(config)
 		case <- fetchWaybackEntryTick:
-			fetchWaybackEntry()
+			fetchWaybackEntry(config)
 		}
 	}
 }
@@ -790,7 +821,7 @@ func main() {
 		}
 	}
 
-	// NOTE(simon): Load old feeds and entries.
+	// NOTE(simon): Load old feeds, entries, and snapshots.
 	if feedsContent, err := os.ReadFile(filepath.Join(config.OutputDirectory, "feeds.json")); err == nil {
 		var feeds []Feed
 		if err := json.Unmarshal(feedsContent, &feeds); err != nil {
@@ -815,21 +846,50 @@ func main() {
 	} else if _, ok := err.(*os.PathError); !ok {
 		log.Fatal(err)
 	}
+	if snapshotsContent, err := os.ReadFile(filepath.Join(config.OutputDirectory, "snapshots.json")); err == nil {
+		var snapshots []WaybackSnapshot
+		if err := json.Unmarshal(snapshotsContent, &snapshots); err != nil {
+			log.Fatal(err)
+		}
+
+		allWaybackSnapshots = snapshots
+	} else if _, ok := err.(*os.PathError); !ok {
+		log.Fatal(err)
+	}
+	if snapshotPointsContent, err := os.ReadFile(filepath.Join(config.OutputDirectory, "snapshotPoints.json")); err == nil {
+		var snapshotPoints map[string]time.Time
+		if err := json.Unmarshal(snapshotPointsContent, &snapshotPoints); err != nil {
+			log.Fatal(err)
+		}
+
+		waybackSnapshotPoints = snapshotPoints
+	} else if _, ok := err.(*os.PathError); !ok {
+		log.Fatal(err)
+	} else {
+		waybackSnapshotPoints = make(map[string]time.Time)
+	}
 
 	// NOTE(simon): Fetch initial feeds
 	log.Println("Fetching feeds from config")
 	for _, link := range config.Urls {
-		go updateFeed(link)
+		go updateFeed(link, config)
 	}
 
 	go func () {
 		for _, link := range config.Urls {
+			timeBeforePoll := time.Now()
+
+			waybackSnapshotLock.Lock()
+			lastPollTime := waybackSnapshotPoints[link]
+			waybackSnapshotLock.Unlock()
+
 			log.Printf("Fetching snapshots for %v\n", link)
-			snapshots, err := queryWaybackSnapshots(link)
+			snapshots, err := queryWaybackSnapshots(link, lastPollTime)
 			if err != nil {
 				log.Printf("ERROR %v: Failed to fetch snapshots %v\n", link, err)
 				continue
 			}
+			log.Printf("Got %v new snapthots for %v\n", len(snapshots), link)
 
 			slices.SortFunc(snapshots, func (a, b WaybackSnapshot) int {
 				return strings.Compare(a.Date, b.Date)
@@ -852,7 +912,25 @@ func main() {
 			merged = append(merged, snapshots[j:]...)
 
 			allWaybackSnapshots = merged
+
+			waybackSnapshotPoints[link] = timeBeforePoll
 			waybackSnapshotLock.Unlock()
+		}
+
+		encodedSnapshots, snapshotsErr := jsonFromSnapshots()
+		if snapshotsErr == nil {
+			snapshotsErr = atomicWriteFile(filepath.Join(config.OutputDirectory, "snapshots.json"), encodedSnapshots)
+		}
+		if snapshotsErr != nil {
+			log.Printf("ERROR: Could not save snapshots: %v\n", snapshotsErr)
+		}
+
+		encodedSnapshotPoints, snapshotPointsErr := jsonFromSnapshotPoints()
+		if snapshotPointsErr == nil {
+			snapshotPointsErr = atomicWriteFile(filepath.Join(config.OutputDirectory, "snapshotPoints.json"), encodedSnapshotPoints)
+		}
+		if snapshotPointsErr != nil {
+			log.Printf("ERROR: Could not save snapshot points: %v\n", snapshotPointsErr)
 		}
 	}()
 
