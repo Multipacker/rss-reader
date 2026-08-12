@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -92,7 +93,7 @@ func parseAtomDateOrNow(raw string) time.Time {
 	return time.Now()
 }
 
-func Parse(reader io.Reader, url string) (feed Feed, entries []Entry, err error) {
+func Parse(reader io.Reader, feedUrl string) (feed Feed, entries []Entry, err error) {
 	decoder := xml.NewDecoder(reader)
 
 	// NOTE(simon): Find the first start element to determine the kind of feed we have.
@@ -114,11 +115,16 @@ func Parse(reader io.Reader, url string) (feed Feed, entries []Entry, err error)
 	// NOTE(simon): Parse the feed based on startToken.
 	switch startToken.Name.Local {
 	case "rss":
+		type RssGuid struct {
+			XMLName     xml.Name `xml:"guid"`
+			Value       string   `xml:",chardata"`
+			IsPermaLink string   `xml:"isPermaLink,attr"`
+		}
 		type RssItem struct {
 			XMLName xml.Name `xml:"item"`
 			Title   string   `xml:"title"`
 			Link    string   `xml:"link"`
-			Guid    string   `xml:"guid"`
+			Guid    RssGuid  `xml:"guid"`
 			PubDate string   `xml:"pubDate"`
 		}
 
@@ -149,7 +155,7 @@ func Parse(reader io.Reader, url string) (feed Feed, entries []Entry, err error)
 		feed.Title       = rssFeed.Title
 		feed.Description = rssFeed.Description
 		feed.Updated     = parseRssDateOrNow(rssFeed.LastBuildDate)
-		feed.Link        = url
+		feed.Link        = feedUrl
 		for _, link := range rssFeed.Links {
 			if link.Rel == "self" {
 				feed.Link = link.Href
@@ -162,9 +168,14 @@ func Parse(reader io.Reader, url string) (feed Feed, entries []Entry, err error)
 			var entry Entry
 			entry.Feed  = feed.Id
 			entry.Title = item.Title
-			entry.Link  = item.Link
-			if item.Guid != "" {
-				entry.Id = item.Guid
+
+			if _, err := url.Parse(item.Guid.Value); item.Guid.IsPermaLink != "false" && err == nil {
+				entry.Link = item.Guid.Value
+			} else {
+				entry.Link = item.Link
+			}
+			if item.Guid.Value != "" {
+				entry.Id = item.Guid.Value
 			} else {
 				entry.Id = entry.Link
 			}
@@ -211,7 +222,7 @@ func Parse(reader io.Reader, url string) (feed Feed, entries []Entry, err error)
 		feed.Title       = atomFeed.Title
 		feed.Description = atomFeed.Subtitle
 		feed.Id          = atomFeed.Id
-		feed.Link        = url
+		feed.Link        = feedUrl
 		for _, link := range atomFeed.Links {
 			if link.Rel == "self" {
 				feed.Link = link.Href
