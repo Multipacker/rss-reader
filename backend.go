@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io/fs"
+	"html/template"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -17,6 +19,24 @@ import (
 	"Multipacker/rss-reader/internal/feedparse"
 	"Multipacker/rss-reader/internal/wayback"
 )
+
+
+
+type TemplateExecutor interface {
+	ExecuteTemplate(writer io.Writer, name string, data any) error
+}
+
+type DebugTemplateExecutor struct {
+	Glob string
+}
+
+func (executor DebugTemplateExecutor) ExecuteTemplate(writer io.Writer, name string, data any) error {
+	templates, err := template.ParseGlob(executor.Glob)
+	if err != nil {
+		return fmt.Errorf("parse glob: %w", err)
+	}
+	return templates.ExecuteTemplate(writer, name, data)
+}
 
 
 
@@ -221,6 +241,54 @@ func update(storage *Storage) {
 //go:embed all:static
 var staticFiles embed.FS
 
+//go:embed all:templates
+var templateFiles embed.FS
+
+type EntryInfo struct {
+	Query       string
+	HasMore     bool
+	NextOffset  int
+	Entries     []feedparse.Entry
+}
+
+func GetEntryInfo(storage *Storage, offset int, size int, query string) EntryInfo {
+	entries := storage.Entries()
+
+	if query != "" {
+		var filtered []feedparse.Entry
+		for _, entry := range entries {
+			matches := true
+			for field := range strings.FieldsSeq(strings.ToLower(query)) {
+				matches = matches && strings.Contains(strings.ToLower(entry.Title), field)
+			}
+
+			if matches {
+				filtered = append(filtered, entry)
+			}
+		}
+		entries = filtered
+	}
+
+	size = min(size, len(entries) - offset)
+
+	return EntryInfo{
+		Query:      query,
+		Entries:    entries[offset:offset + size],
+		NextOffset: offset + size,
+		HasMore:    len(entries) > offset + size,
+	}
+}
+
+func handleIndex(templateExecutor TemplateExecutor, storage *Storage) http.HandlerFunc {
+	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		entryInfo := GetEntryInfo(storage, 0, 20, "")
+		err := templateExecutor.ExecuteTemplate(response, "index.gohtml", entryInfo)
+		if err != nil {
+			log.Println(fmt.Errorf("execute template: %w", err))
+		}
+	})
+}
+
 func handleFeeds(storage *Storage) http.Handler {
 	return http.HandlerFunc(func (w http.ResponseWriter, request *http.Request) {
 		encoded, err := storage.jsonFromFeeds()
@@ -236,18 +304,28 @@ func handleFeeds(storage *Storage) http.Handler {
 	})
 }
 
-func handleEntries(storage *Storage) http.Handler {
-	return http.HandlerFunc(func (w http.ResponseWriter, request *http.Request) {
-		encoded, err := storage.jsonFromEntries()
+func handleEntries(templateExecutor TemplateExecutor, storage *Storage) http.Handler {
+	return http.HandlerFunc(func (response http.ResponseWriter, request *http.Request) {
+		queryOffset := request.FormValue("offset")
+		querySize := request.FormValue("size")
+		query := request.FormValue("query")
 
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			return
+		if queryOffset == "" {
+			queryOffset = "0"
+		}
+		if querySize == "" {
+			querySize = "20"
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		w.Write(encoded)
+		offset, _ := strconv.Atoi(queryOffset)
+		size, _ := strconv.Atoi(querySize)
+
+		entryInfo := GetEntryInfo(storage, offset, size, query)
+
+		err := templateExecutor.ExecuteTemplate(response, "items.gohtml", entryInfo)
+		if err != nil {
+			log.Println(fmt.Errorf("execute template: %w", err))
+		}
 	})
 }
 
@@ -306,6 +384,7 @@ func main() {
 		log.Fatal(fmt.Errorf("create storage: %w", err))
 	}
 
+	if false {
 	// NOTE(simon): Fetch initial feeds
 	log.Println("Fetching feeds from config")
 	for _, link := range config.Urls {
@@ -337,20 +416,24 @@ func main() {
 
 	// NOTE(simon): Start feed update process.
 	go update(storage)
+	}
 
 	// NOTE(simon): Setup handler for reloading of static files
 	var staticHandler http.Handler
+	var templateExecutor TemplateExecutor
 	if *reload {
-		staticHandler = http.FileServer(http.Dir("static"))
+		staticHandler = http.StripPrefix("/static/", http.FileServer(http.Dir("static")))
+		templateExecutor = DebugTemplateExecutor{"templates/*.gohtml"}
 	} else {
-		root, _ := fs.Sub(staticFiles, "static")
-		staticHandler = http.FileServerFS(root)
+		staticHandler = http.FileServerFS(staticFiles)
+		templateExecutor = template.Must(template.ParseFS(templateFiles, "**/*.gohtml"))
 	}
 
 	// NOTE(simon): Setup and start the server.
-	http.Handle("/", staticHandler)
+	http.Handle("/", handleIndex(templateExecutor, storage))
+	http.Handle("/static/", staticHandler)
 	http.Handle("GET /feeds", handleFeeds(storage))
-	http.Handle("GET /entries", handleEntries(storage))
+	http.Handle("GET /entries", handleEntries(templateExecutor, storage))
 
 	address := fmt.Sprintf("%s:%d", config.Host, config.Port)
 	log.Printf("INFO: Serving on http://%s", address)

@@ -2,7 +2,7 @@ let feeds = new Map();
 let entries = [];
 let read_articles = new Set();
 
-window.onload = async () => {
+/*window.onload = async () => {
     read_articles = new Set(JSON.parse(localStorage.getItem("read_articles")));
 
     // NOTE(simon): Load and unpack feeds and entries.
@@ -32,7 +32,7 @@ window.onload = async () => {
         });
 
     update_list();
-};
+};*/
 
 const save_read = (id) => {
     read_articles.add(id);
@@ -52,7 +52,7 @@ const highlight = (parts) => parts.map((value, index) => {
     }
 });
 
-const update_list = () => {
+/*const update_list = () => {
     // NOTE(simon): Acquire DOM elements.
     const search_filter = document.getElementById("search_filter");
     const search_type   = document.getElementById("search_type");
@@ -172,4 +172,4 @@ const update_list = () => {
             return elem;
         })
     )
-};
+};*/

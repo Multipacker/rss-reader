@@ -145,7 +145,7 @@ func (storage *Storage) jsonFromFeeds() ([]byte, error) {
 	return json.Marshal(feeds)
 }
 
-func (storage *Storage) jsonFromEntries() ([]byte, error) {
+func (storage *Storage) Entries() []feedparse.Entry {
 	// NOTE(simon): Collect all entries.
 	var entries []feedparse.Entry
 	for _, entryInstance := range storage.entries.Range {
@@ -153,6 +153,15 @@ func (storage *Storage) jsonFromEntries() ([]byte, error) {
 		entries = append(entries, entry)
 	}
 
+	slices.SortFunc(entries, func (a, b feedparse.Entry) int {
+		return b.Published.Compare(a.Published)
+	})
+
+	return entries
+}
+
+func (storage *Storage) jsonFromEntries() ([]byte, error) {
+	entries := storage.Entries()
 	return json.Marshal(entries)
 }
 

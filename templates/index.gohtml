@@ -5,9 +5,10 @@
         <title>RSS Feed</title>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <script src="index.js"></script>
-        <link rel="stylesheet" href="style.css">
-        <link rel="icon" href="favicon.svg">
+        <script src="/static/htmx.min.js@2.0.10"></script>
+        <script src="/static/index.js"></script>
+        <link rel="stylesheet" href="/static/style.css">
+        <link rel="icon" href="/static/favicon.svg">
     </head>
     <body style="margin: 0;">
         <template id="item_template">
@@ -29,9 +30,11 @@
                     <option>Articles</option>
                     <option>Feeds</option>
                 </select>
-                <input id="search" style="flex: 1;" placeholder="Search..." type="search" oninput="update_list();">
+                <input id="search" style="flex: 1;" placeholder="Search..." type="search" hx-trigger="search, keyup delay:200" hx-get="/entries" hx-vals="js:{query: this.value}" hx-target="#results">
             </div>
-            <div id="results"></div>
+            <div id="results">
+                {{ template "items.gohtml" . }}
+            </div>
         </main>
     </body>
 </html>

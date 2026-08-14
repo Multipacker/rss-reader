@@ -1,0 +1,16 @@
+{{ range .Entries }} 
+    <a class="item" href="{{ .Link }}">
+        <p class="item-title">{{ .Title }}</p>
+        <p class="item-description">{{ .Feed }} {{ .Published }}</p>
+    </a>
+{{ end }}
+{{ if .HasMore }}
+<span
+    class="item"
+    hx-trigger="intersect once"
+    hx-swap="outerHTML"
+    hx-get="/entries?offset={{ .NextOffset }}&size={{ len .Entries }}{{ if .Query }}&query={{ .Query }}{{ end }}"
+    >
+    Loading more...
+</span>
+{{ end }}
