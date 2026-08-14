@@ -134,14 +134,23 @@ func (storage *Storage) storeFeed(feed feedparse.Feed, entries []feedparse.Entry
 
 
 
-func (storage *Storage) jsonFromFeeds() ([]byte, error) {
-	// NOTE(simon): Collect all feeds.
+func (storage *Storage) Feeds() []feedparse.Feed {
+	// NOTE(simon): Collect all entries.
 	var feeds []feedparse.Feed
 	for _, feedInstance := range storage.feeds.Range {
 		feed := feedInstance.(feedparse.Feed)
 		feeds = append(feeds, feed)
 	}
 
+	slices.SortFunc(feeds, func (a, b feedparse.Feed) int {
+		return strings.Compare(a.Title, b.Title)
+	})
+
+	return feeds
+}
+
+func (storage *Storage) jsonFromFeeds() ([]byte, error) {
+	feeds := storage.Feeds()
 	return json.Marshal(feeds)
 }
 

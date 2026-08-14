@@ -244,6 +244,41 @@ var staticFiles embed.FS
 //go:embed all:templates
 var templateFiles embed.FS
 
+type FeedInfo struct {
+	Query       string
+	HasMore     bool
+	NextOffset  int
+	Feeds       []feedparse.Feed
+}
+
+func GetFeedInfo(storage *Storage, offset int, size int, query string) FeedInfo {
+	feeds := storage.Feeds()
+
+	if query != "" {
+		var filtered []feedparse.Feed
+		for _, entry := range feeds {
+			matches := true
+			for field := range strings.FieldsSeq(strings.ToLower(query)) {
+				matches = matches && strings.Contains(strings.ToLower(entry.Title), field)
+			}
+
+			if matches {
+				filtered = append(filtered, entry)
+			}
+		}
+		feeds = filtered
+	}
+
+	size = min(size, len(feeds) - offset)
+
+	return FeedInfo{
+		Query:      query,
+		Feeds:      feeds[offset:offset + size],
+		NextOffset: offset + size,
+		HasMore:    len(feeds) > offset + size,
+	}
+}
+
 type EntryInfo struct {
 	Query       string
 	HasMore     bool
@@ -281,30 +316,56 @@ func GetEntryInfo(storage *Storage, offset int, size int, query string) EntryInf
 
 func handleIndex(templateExecutor TemplateExecutor, storage *Storage) http.HandlerFunc {
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		entryInfo := GetEntryInfo(storage, 0, 20, "")
-		err := templateExecutor.ExecuteTemplate(response, "index.gohtml", entryInfo)
+		http.Redirect(response, request, "/entries", http.StatusFound)
+	})
+}
+
+func handleFeedsGet(templateExecutor TemplateExecutor, storage *Storage) http.Handler {
+	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		feedInfo := GetFeedInfo(storage, 0, 20, "")
+		err := templateExecutor.ExecuteTemplate(response, "feeds.gohtml", feedInfo)
 		if err != nil {
 			log.Println(fmt.Errorf("execute template: %w", err))
 		}
 	})
 }
 
-func handleFeeds(storage *Storage) http.Handler {
-	return http.HandlerFunc(func (w http.ResponseWriter, request *http.Request) {
-		encoded, err := storage.jsonFromFeeds()
+func handleFeedsPost(templateExecutor TemplateExecutor, storage *Storage) http.Handler {
+	return http.HandlerFunc(func (response http.ResponseWriter, request *http.Request) {
+		queryOffset := request.FormValue("offset")
+		querySize := request.FormValue("size")
+		query := request.FormValue("query")
 
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			return
+		if queryOffset == "" {
+			queryOffset = "0"
+		}
+		if querySize == "" {
+			querySize = "20"
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		w.Write(encoded)
+		offset, _ := strconv.Atoi(queryOffset)
+		size, _ := strconv.Atoi(querySize)
+
+		feedInfo := GetFeedInfo(storage, offset, size, query)
+
+		err := templateExecutor.ExecuteTemplate(response, "feed_items.gohtml", feedInfo)
+		if err != nil {
+			log.Println(fmt.Errorf("execute template: %w", err))
+		}
 	})
 }
 
-func handleEntries(templateExecutor TemplateExecutor, storage *Storage) http.Handler {
+func handleEntriesGet(templateExecutor TemplateExecutor, storage *Storage) http.Handler {
+	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		entryInfo := GetEntryInfo(storage, 0, 20, "")
+		err := templateExecutor.ExecuteTemplate(response, "entries.gohtml", entryInfo)
+		if err != nil {
+			log.Println(fmt.Errorf("execute template: %w", err))
+		}
+	})
+}
+
+func handleEntriesPost(templateExecutor TemplateExecutor, storage *Storage) http.Handler {
 	return http.HandlerFunc(func (response http.ResponseWriter, request *http.Request) {
 		queryOffset := request.FormValue("offset")
 		querySize := request.FormValue("size")
@@ -322,7 +383,7 @@ func handleEntries(templateExecutor TemplateExecutor, storage *Storage) http.Han
 
 		entryInfo := GetEntryInfo(storage, offset, size, query)
 
-		err := templateExecutor.ExecuteTemplate(response, "items.gohtml", entryInfo)
+		err := templateExecutor.ExecuteTemplate(response, "entry_items.gohtml", entryInfo)
 		if err != nil {
 			log.Println(fmt.Errorf("execute template: %w", err))
 		}
@@ -432,8 +493,10 @@ func main() {
 	// NOTE(simon): Setup and start the server.
 	http.Handle("/", handleIndex(templateExecutor, storage))
 	http.Handle("/static/", staticHandler)
-	http.Handle("GET /feeds", handleFeeds(storage))
-	http.Handle("GET /entries", handleEntries(templateExecutor, storage))
+	http.Handle("GET /feeds", handleFeedsGet(templateExecutor, storage))
+	http.Handle("POST /feeds", handleFeedsPost(templateExecutor, storage))
+	http.Handle("GET /entries", handleEntriesGet(templateExecutor, storage))
+	http.Handle("POST /entries", handleEntriesPost(templateExecutor, storage))
 
 	address := fmt.Sprintf("%s:%d", config.Host, config.Port)
 	log.Printf("INFO: Serving on http://%s", address)

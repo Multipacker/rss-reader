@@ -1,7 +1,7 @@
-{{ range .Entries }} 
+{{ range .Feeds }}
     <a class="item" href="{{ .Link }}">
         <p class="item-title">{{ .Title }}</p>
-        <p class="item-description">{{ .Feed }} {{ .Published }}</p>
+        <p class="item-description">{{ .Description }}</p>
     </a>
 {{ end }}
 {{ if .HasMore }}
@@ -9,7 +9,7 @@
     class="item"
     hx-trigger="intersect once"
     hx-swap="outerHTML"
-    hx-get="/entries?offset={{ .NextOffset }}&size={{ len .Entries }}{{ if .Query }}&query={{ .Query }}{{ end }}"
+    hx-post="/feeds?offset={{ .NextOffset }}&size={{ len .Feeds }}{{ if .Query }}&query={{ .Query }}{{ end }}"
     >
     Loading more...
 </span>
