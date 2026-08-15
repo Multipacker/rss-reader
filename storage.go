@@ -154,6 +154,145 @@ func (storage *Storage) jsonFromFeeds() ([]byte, error) {
 	return json.Marshal(feeds)
 }
 
+type HighlightPart struct {
+	Value     string
+	Highlight bool
+}
+
+type HighlightString []HighlightPart
+
+type EntryDescription struct {
+	Title string
+	Feed  string
+	Link  string
+	Published time.Time
+
+	HighlightTitle HighlightString
+	HighlightFeed  HighlightString
+}
+
+func (storage *Storage) QueryEntries(query string) []EntryDescription {
+	// NOTE(simon): Collect entries to descriptions.
+	descriptions := []EntryDescription{}
+	for _, entry := range storage.Entries() {
+		var feedTitle string
+		if feedInstance, ok := storage.feeds.Load(entry.Feed); ok {
+			feed := feedInstance.(feedparse.Feed)
+			feedTitle = feed.Title
+		}
+
+		description := EntryDescription{
+			Title: entry.Title,
+			Feed: feedTitle,
+			Link: entry.Link,
+			Published: entry.Published,
+		}
+
+		descriptions = append(descriptions, description)
+	}
+
+	queryWords := strings.Fields(strings.ToLower(query))
+	for i, description := range descriptions {
+		type Range struct {
+			min int
+			max int
+		}
+
+		lowerTitle := strings.ToLower(description.Title)
+
+		// NOTE(simon): Collect matches.
+		var matches []Range
+		for _, queryWord := range queryWords {
+			offset := 0
+			for {
+				start := offset + strings.Index(lowerTitle[offset:], queryWord)
+				if start < offset {
+					break
+				}
+
+				matches = append(matches, Range{start, start + len(queryWord)})
+				offset = start + len(queryWord)
+			}
+		}
+
+		// NOTE(simon): Sort mathces on starting position.
+		slices.SortFunc(matches, func (a, b Range) int {
+			return a.min - b.min
+		})
+
+		// NOTE(simon): Build highlight string.
+		previousOffset := 0
+		for _, match := range matches {
+			if previousOffset < match.min {
+				description.HighlightTitle = append(
+					description.HighlightTitle,
+					HighlightPart{Value: description.Title[previousOffset:match.min], Highlight: false},
+				)
+			}
+
+			// NOTE(simon): If we have overlapping matches, keep the first one.
+			if previousOffset <= match.min {
+				description.HighlightTitle = append(
+					description.HighlightTitle,
+					HighlightPart{Value: description.Title[match.min:match.max], Highlight: true},
+				)
+
+				previousOffset = match.max
+			}
+		}
+		if previousOffset != len(description.Title) {
+			description.HighlightTitle = append(
+				description.HighlightTitle,
+				HighlightPart{Value: description.Title[previousOffset:], Highlight: false},
+			)
+		}
+
+		descriptions[i] = description
+	}
+
+	// NOTE(simon): Filter results.
+	filterOffset := 0
+	for _, description := range descriptions {
+		matches := 0
+		for _, match := range description.HighlightTitle {
+			if match.Highlight {
+				matches++
+			}
+		}
+
+		if matches >= len(queryWords) {
+			descriptions[filterOffset] = description
+			filterOffset++
+		}
+	}
+	descriptions = descriptions[:filterOffset]
+
+	// NOTE(simon): Sort the result.
+	slices.SortFunc(descriptions, func(a, b EntryDescription) int {
+		result := 0
+
+		if result == 0 {
+			result = len(b.HighlightTitle) - len(a.HighlightTitle)
+		}
+
+		if result == 0 {
+			result = b.Published.Compare(a.Published)
+		}
+
+		if result == 0 {
+			result = strings.Compare(a.Title, b.Title)
+		}
+
+		if result == 0 {
+			result = strings.Compare(a.Feed, b.Feed)
+		}
+
+		return result
+	})
+
+	return descriptions
+}
+
 func (storage *Storage) Entries() []feedparse.Entry {
 	// NOTE(simon): Collect all entries.
 	var entries []feedparse.Entry

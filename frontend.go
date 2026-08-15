@@ -78,26 +78,11 @@ type EntryInfo struct {
 	Query       string
 	HasMore     bool
 	NextOffset  int
-	Entries     []feedparse.Entry
+	Entries     []EntryDescription
 }
 
 func GetEntryInfo(storage *Storage, offset int, size int, query string) EntryInfo {
-	entries := storage.Entries()
-
-	if query != "" {
-		var filtered []feedparse.Entry
-		for _, entry := range entries {
-			matches := true
-			for field := range strings.FieldsSeq(strings.ToLower(query)) {
-				matches = matches && strings.Contains(strings.ToLower(entry.Title), field)
-			}
-
-			if matches {
-				filtered = append(filtered, entry)
-			}
-		}
-		entries = filtered
-	}
+	entries := storage.QueryEntries(query)
 
 	size = min(size, len(entries) - offset)
 
