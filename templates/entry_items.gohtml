@@ -3,7 +3,7 @@
         <p class="item-title">
             {{ range .HighlightTitle }}{{ if .Highlight }}<mark>{{ .Value }}</mark>{{ else }}{{ .Value }}{{ end }}{{ end }}
         </p>
-        <p class="item-description">{{ .Feed }} {{ .Published }}</p>
+        <p class="item-description">{{ .Feed }} <time datetime={{ .Published }}>{{ .Published }}</time></p>
     </a>
 {{ end }}
 {{ if .HasMore }}

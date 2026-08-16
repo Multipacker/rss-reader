@@ -2,6 +2,23 @@ let feeds = new Map();
 let entries = [];
 let read_articles = new Set();
 
+const timeFormatter = Intl.DateTimeFormat(undefined, {
+    day: "numeric",
+    month: "numeric",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+});
+
+function setLocaleDates(tree = document) {
+    tree.querySelectorAll("time[datetime]").forEach(timeRoot => {
+        timeRoot.innerText = timeFormatter.format(new Date(timeRoot.getAttribute("datetime")));
+    });
+}
+
+htmx.on("htmx:load", event => setLocaleDates(event.target));
+
 /*window.onload = async () => {
     read_articles = new Set(JSON.parse(localStorage.getItem("read_articles")));
 
