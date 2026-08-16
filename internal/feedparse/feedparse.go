@@ -30,7 +30,7 @@ type Feed struct {
 func parseRssDateOrNow(raw string) time.Time {
 	// NOTE(simon): Early out on empty dates.
 	if raw == "" {
-		return time.Now()
+		return time.Now().UTC()
 	}
 
 	// NOTE(simon): Trim anything before and including the first comma.
@@ -58,19 +58,19 @@ func parseRssDateOrNow(raw string) time.Time {
 		}
 
 		if parsed.Before(time.Now()) {
-			return parsed
+			return parsed.UTC()
 		}
 	}
 
 	log.Printf("ERROR: Failed to parse \"%v\" as a RSS date", raw)
 
-	return time.Now()
+	return time.Now().UTC()
 }
 
 func parseAtomDateOrNow(raw string) time.Time {
 	// NOTE(simon): Early out on empty dates.
 	if raw == "" {
-		return time.Now()
+		return time.Now().UTC()
 	}
 
 	formats := []string{
@@ -84,13 +84,13 @@ func parseAtomDateOrNow(raw string) time.Time {
 		}
 
 		if parsed.Before(time.Now()) {
-			return parsed
+			return parsed.UTC()
 		}
 	}
 
 	log.Printf("ERROR: Failed to parse \"%v\" as an Atom date", raw)
 
-	return time.Now()
+	return time.Now().UTC()
 }
 
 func Parse(reader io.Reader, feedUrl string) (feed Feed, entries []Entry, err error) {
