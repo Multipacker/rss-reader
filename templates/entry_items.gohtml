@@ -1,5 +1,5 @@
 {{ range .Entries }}
-    <a class="item" href="{{ .Link }}">
+    <a class="item" href="{{ .Link }}" data-entry-id="{{ .Id }}">
         <p class="item-title">
             {{ range .HighlightTitle }}{{ if .Highlight }}<mark>{{ .Value }}</mark>{{ else }}{{ .Value }}{{ end }}{{ end }}
         </p>

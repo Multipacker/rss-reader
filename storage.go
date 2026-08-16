@@ -165,6 +165,7 @@ type EntryDescription struct {
 	Title string
 	Feed  string
 	Link  string
+	Id    string
 	Published time.Time
 
 	HighlightTitle HighlightString
@@ -185,6 +186,7 @@ func (storage *Storage) QueryEntries(query string) []EntryDescription {
 			Title: entry.Title,
 			Feed: feedTitle,
 			Link: entry.Link,
+			Id: entry.Id,
 			Published: entry.Published,
 		}
 
