@@ -169,7 +169,7 @@ func Parse(reader io.Reader, feedUrl string) (feed Feed, entries []Entry, err er
 			entry.Feed  = feed.Id
 			entry.Title = item.Title
 
-			if _, err := url.Parse(item.Guid.Value); item.Guid.IsPermaLink != "false" && err == nil {
+			if _, err := url.Parse(item.Guid.Value); item.Guid.Value != "" && item.Guid.IsPermaLink != "false" && err == nil {
 				entry.Link = item.Guid.Value
 			} else {
 				entry.Link = item.Link
