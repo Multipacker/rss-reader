@@ -12,7 +12,8 @@
     hx-trigger="intersect once"
     hx-swap="outerHTML"
     hx-post="/entries?offset={{ .NextOffset }}&size={{ len .Entries }}{{ if .Query }}&query={{ .Query }}{{ end }}"
+    style="text-align: center;"
     >
-    Loading more...
+    Loading...
 </span>
 {{ end }}
