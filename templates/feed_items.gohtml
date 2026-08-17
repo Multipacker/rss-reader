@@ -1,6 +1,8 @@
 {{ range .Feeds }}
     <a class="item" href="{{ .Link }}">
-        <p class="item-title">{{ .Title }}</p>
+        <p class="item-title">
+            {{ template "highlight_string.gohtml" .HighlightTitle }}
+        </p>
         <p class="item-description">{{ .Description }}</p>
     </a>
 {{ end }}

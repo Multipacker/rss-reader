@@ -8,9 +8,6 @@ import (
 	"log"
 	"net/http"
 	"strconv"
-	"strings"
-
-	"Multipacker/rss-reader/internal/feedparse"
 )
 
 
@@ -39,30 +36,25 @@ var staticFiles embed.FS
 //go:embed all:templates
 var templateFiles embed.FS
 
+
+
+func handleIndex(templateExecutor TemplateExecutor, storage *Storage) http.HandlerFunc {
+	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		http.Redirect(response, request, "/entries", http.StatusFound)
+	})
+}
+
+
+
 type FeedInfo struct {
 	Query       string
 	HasMore     bool
 	NextOffset  int
-	Feeds       []feedparse.Feed
+	Feeds       []FeedDescription
 }
 
 func GetFeedInfo(storage *Storage, offset int, size int, query string) FeedInfo {
-	feeds := storage.Feeds()
-
-	if query != "" {
-		var filtered []feedparse.Feed
-		for _, entry := range feeds {
-			matches := true
-			for field := range strings.FieldsSeq(strings.ToLower(query)) {
-				matches = matches && strings.Contains(strings.ToLower(entry.Title), field)
-			}
-
-			if matches {
-				filtered = append(filtered, entry)
-			}
-		}
-		feeds = filtered
-	}
+	feeds := storage.QueryFeeds(query)
 
 	size = min(size, len(feeds) - offset)
 
@@ -72,32 +64,6 @@ func GetFeedInfo(storage *Storage, offset int, size int, query string) FeedInfo 
 		NextOffset: offset + size,
 		HasMore:    len(feeds) > offset + size,
 	}
-}
-
-type EntryInfo struct {
-	Query       string
-	HasMore     bool
-	NextOffset  int
-	Entries     []EntryDescription
-}
-
-func GetEntryInfo(storage *Storage, offset int, size int, query string) EntryInfo {
-	entries := storage.QueryEntries(query)
-
-	size = min(size, len(entries) - offset)
-
-	return EntryInfo{
-		Query:      query,
-		Entries:    entries[offset:offset + size],
-		NextOffset: offset + size,
-		HasMore:    len(entries) > offset + size,
-	}
-}
-
-func handleIndex(templateExecutor TemplateExecutor, storage *Storage) http.HandlerFunc {
-	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		http.Redirect(response, request, "/entries", http.StatusFound)
-	})
 }
 
 func handleFeedsGet(templateExecutor TemplateExecutor, storage *Storage) http.Handler {
@@ -133,6 +99,28 @@ func handleFeedsPost(templateExecutor TemplateExecutor, storage *Storage) http.H
 			log.Println(fmt.Errorf("execute template: %w", err))
 		}
 	})
+}
+
+
+
+type EntryInfo struct {
+	Query       string
+	HasMore     bool
+	NextOffset  int
+	Entries     []EntryDescription
+}
+
+func GetEntryInfo(storage *Storage, offset int, size int, query string) EntryInfo {
+	entries := storage.QueryEntries(query)
+
+	size = min(size, len(entries) - offset)
+
+	return EntryInfo{
+		Query:      query,
+		Entries:    entries[offset:offset + size],
+		NextOffset: offset + size,
+		HasMore:    len(entries) > offset + size,
+	}
 }
 
 func handleEntriesGet(templateExecutor TemplateExecutor, storage *Storage) http.Handler {

@@ -134,43 +134,12 @@ func (storage *Storage) storeFeed(feed feedparse.Feed, entries []feedparse.Entry
 
 
 
-func (storage *Storage) Feeds() []feedparse.Feed {
-	// NOTE(simon): Collect all entries.
-	var feeds []feedparse.Feed
-	for _, feedInstance := range storage.feeds.Range {
-		feed := feedInstance.(feedparse.Feed)
-		feeds = append(feeds, feed)
-	}
-
-	slices.SortFunc(feeds, func (a, b feedparse.Feed) int {
-		return strings.Compare(a.Title, b.Title)
-	})
-
-	return feeds
-}
-
-func (storage *Storage) jsonFromFeeds() ([]byte, error) {
-	feeds := storage.Feeds()
-	return json.Marshal(feeds)
-}
-
 type HighlightPart struct {
 	Value     string
 	Highlight bool
 }
 
 type HighlightString []HighlightPart
-
-type EntryDescription struct {
-	Title string
-	Feed  string
-	Link  string
-	Id    string
-	Published time.Time
-
-	HighlightTitle HighlightString
-	HighlightFeed  HighlightString
-}
 
 func highlightFromValueQuery(value string, queryWords []string) HighlightString {
 	type Range struct {
@@ -219,6 +188,104 @@ func highlightFromValueQuery(value string, queryWords []string) HighlightString 
 	}
 
 	return highlight
+}
+
+
+
+type FeedDescription struct {
+	Title string
+	Description string
+	Link string
+
+	HighlightTitle HighlightString
+}
+
+func (storage *Storage) QueryFeeds(query string) []FeedDescription {
+	queryWords := strings.Fields(strings.ToLower(query))
+
+	// NOTE(simon): Collect feeds to descriptions.
+	descriptions := []FeedDescription{}
+	for _, feed := range storage.Feeds() {
+		description := FeedDescription{
+			Title: feed.Title,
+			Description: feed.Description,
+			Link: feed.Link,
+		}
+
+		descriptions = append(descriptions, description)
+	}
+
+	for i, description := range descriptions {
+		description.HighlightTitle = highlightFromValueQuery(description.Title, queryWords)
+		descriptions[i] = description
+	}
+
+	// NOTE(simon): Filter results.
+	filterOffset := 0
+	for _, description := range descriptions {
+		titleMatches := 0
+		for _, match := range description.HighlightTitle {
+			if match.Highlight {
+				titleMatches++
+			}
+		}
+
+		if titleMatches >= len(queryWords) {
+			descriptions[filterOffset] = description
+			filterOffset++
+		}
+	}
+	descriptions = descriptions[:filterOffset]
+
+	// NOTE(simon): Sort the result.
+	slices.SortFunc(descriptions, func(a, b FeedDescription) int {
+		result := 0
+
+		if result == 0 {
+			result = len(b.HighlightTitle) - len(a.HighlightTitle)
+		}
+
+		if result == 0 {
+			result = strings.Compare(a.Title, b.Title)
+		}
+
+		return result
+	})
+
+	return descriptions
+}
+
+func (storage *Storage) Feeds() []feedparse.Feed {
+	// NOTE(simon): Collect all entries.
+	var feeds []feedparse.Feed
+	for _, feedInstance := range storage.feeds.Range {
+		feed := feedInstance.(feedparse.Feed)
+		feeds = append(feeds, feed)
+	}
+
+	slices.SortFunc(feeds, func (a, b feedparse.Feed) int {
+		return strings.Compare(a.Title, b.Title)
+	})
+
+	return feeds
+}
+
+func (storage *Storage) jsonFromFeeds() ([]byte, error) {
+	feeds := storage.Feeds()
+	return json.Marshal(feeds)
+}
+
+
+
+type EntryDescription struct {
+	Title string
+	Feed  string
+	Link  string
+	Id    string
+	Published time.Time
+
+	HighlightTitle HighlightString
+	HighlightFeed  HighlightString
 }
 
 func (storage *Storage) QueryEntries(query string) []EntryDescription {
@@ -323,6 +390,8 @@ func (storage *Storage) jsonFromEntries() ([]byte, error) {
 	entries := storage.Entries()
 	return json.Marshal(entries)
 }
+
+
 
 func (storage *Storage) saveSnapshots() error {
 	storage.snapshotLock.Lock()
