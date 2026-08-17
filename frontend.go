@@ -110,8 +110,8 @@ type EntryInfo struct {
 	Entries     []EntryDescription
 }
 
-func GetEntryInfo(storage *Storage, offset int, size int, query string) EntryInfo {
-	entries := storage.QueryEntries(query)
+func GetEntryInfo(storage *Storage, offset int, size int, query string, sortOrder SortOrder) EntryInfo {
+	entries := storage.QueryEntries(query, sortOrder)
 
 	size = min(size, len(entries) - offset)
 
@@ -125,7 +125,7 @@ func GetEntryInfo(storage *Storage, offset int, size int, query string) EntryInf
 
 func handleEntriesGet(templateExecutor TemplateExecutor, storage *Storage) http.Handler {
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		entryInfo := GetEntryInfo(storage, 0, 20, "")
+		entryInfo := GetEntryInfo(storage, 0, 20, "", SortOrderNewestFirst)
 		err := templateExecutor.ExecuteTemplate(response, "entries.gohtml", entryInfo)
 		if err != nil {
 			log.Println(fmt.Errorf("execute template: %w", err))
@@ -137,6 +137,7 @@ func handleEntriesPost(templateExecutor TemplateExecutor, storage *Storage) http
 	return http.HandlerFunc(func (response http.ResponseWriter, request *http.Request) {
 		queryOffset := request.FormValue("offset")
 		querySize := request.FormValue("size")
+		queryOrder := request.FormValue("order")
 		query := request.FormValue("query")
 
 		if queryOffset == "" {
@@ -148,8 +149,12 @@ func handleEntriesPost(templateExecutor TemplateExecutor, storage *Storage) http
 
 		offset, _ := strconv.Atoi(queryOffset)
 		size, _ := strconv.Atoi(querySize)
+		sortOrder := SortOrderNewestFirst
+		if queryOrder == "oldest" {
+			sortOrder = SortOrderOldestFirst
+		}
 
-		entryInfo := GetEntryInfo(storage, offset, size, query)
+		entryInfo := GetEntryInfo(storage, offset, size, query, sortOrder)
 
 		err := templateExecutor.ExecuteTemplate(response, "entry_items.gohtml", entryInfo)
 		if err != nil {

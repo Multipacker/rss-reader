@@ -15,6 +15,12 @@ import (
 	"Multipacker/rss-reader/internal/wayback"
 )
 
+type SortOrder int
+const (
+	SortOrderNewestFirst SortOrder = iota
+	SortOrderOldestFirst
+)
+
 type Storage struct {
 	path string
 	feeds sync.Map
@@ -288,7 +294,7 @@ type EntryDescription struct {
 	HighlightFeed  HighlightString
 }
 
-func (storage *Storage) QueryEntries(query string) []EntryDescription {
+func (storage *Storage) QueryEntries(query string, sortOrder SortOrder) []EntryDescription {
 	queryWords := strings.Fields(strings.ToLower(query))
 
 	// NOTE(simon): Collect entries to descriptions.
@@ -354,7 +360,12 @@ func (storage *Storage) QueryEntries(query string) []EntryDescription {
 		}
 
 		if result == 0 {
-			result = b.Published.Compare(a.Published)
+			switch sortOrder {
+			case SortOrderNewestFirst:
+				result = b.Published.Compare(a.Published)
+			case SortOrderOldestFirst:
+				result = a.Published.Compare(b.Published)
+			}
 		}
 
 		if result == 0 {

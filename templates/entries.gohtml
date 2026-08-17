@@ -15,6 +15,10 @@
             <h1 style="text-align: center; margin-bottom: 0;">RSS Feed</h1>
 
             <form style="display: flex; justify-content: center; flex-wrap: wrap; gap: 0.5em; margin-left: 0.5em; margin-right: 0.5em;" hx-target="#results" hx-swap="innerHTML scroll:top">
+                <select name="order" hx-post="/entries">
+                    <option value="newest">Newest first</option>
+                    <option value="oldest">Oldest first</option>
+                </select>
                 <select id="search_filter" hx-post="/entries">
                     <option>Unread</option>
                     <option>Read</option>
