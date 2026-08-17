@@ -24,10 +24,20 @@
                     <option>Read</option>
                     <option>All</option>
                 </select>
-                <input id="search" name="query" style="flex: 1;" placeholder="Search..." type="search" hx-trigger="search, keyup changed delay:200ms" hx-post="/entries">
+                <input name="query" style="flex: 1;" placeholder="Search..." type="search" hx-trigger="search, keyup changed delay:200ms" hx-post="/entries">
             </form>
+
             <div id="results">
-                {{ template "entry_items.gohtml" . }}
+                <span
+                    class="item"
+                    style="text-align: center;"
+                    hx-trigger="load"
+                    hx-swap="outerHTML"
+                    hx-post="/entries"
+                    hx-include="form > *"
+                    >
+                    Loading...
+                </span>
             </div>
         </main>
     </body>

@@ -103,30 +103,9 @@ func handleFeedsPost(templateExecutor TemplateExecutor, storage *Storage) http.H
 
 
 
-type EntryInfo struct {
-	Query       string
-	HasMore     bool
-	NextOffset  int
-	Entries     []EntryDescription
-}
-
-func GetEntryInfo(storage *Storage, offset int, size int, query string, sortOrder SortOrder) EntryInfo {
-	entries := storage.QueryEntries(query, sortOrder)
-
-	size = min(size, len(entries) - offset)
-
-	return EntryInfo{
-		Query:      query,
-		Entries:    entries[offset:offset + size],
-		NextOffset: offset + size,
-		HasMore:    len(entries) > offset + size,
-	}
-}
-
 func handleEntriesGet(templateExecutor TemplateExecutor, storage *Storage) http.Handler {
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		entryInfo := GetEntryInfo(storage, 0, 20, "", SortOrderNewestFirst)
-		err := templateExecutor.ExecuteTemplate(response, "entries.gohtml", entryInfo)
+		err := templateExecutor.ExecuteTemplate(response, "entries.gohtml", nil)
 		if err != nil {
 			log.Println(fmt.Errorf("execute template: %w", err))
 		}
@@ -134,27 +113,41 @@ func handleEntriesGet(templateExecutor TemplateExecutor, storage *Storage) http.
 }
 
 func handleEntriesPost(templateExecutor TemplateExecutor, storage *Storage) http.Handler {
+	type EntryInfo struct {
+		Query string
+		Order string
+
+		HasMore  bool
+		NextPage int
+		Entries  []EntryDescription
+	}
+
+	sortOrderMap := map[string]SortOrder{
+		"newest": SortOrderNewestFirst,
+		"oldest": SortOrderOldestFirst,
+	}
+
 	return http.HandlerFunc(func (response http.ResponseWriter, request *http.Request) {
-		queryOffset := request.FormValue("offset")
-		querySize := request.FormValue("size")
-		queryOrder := request.FormValue("order")
-		query := request.FormValue("query")
+		formPage  := request.FormValue("page")
+		formOrder := request.FormValue("order")
+		formQuery := request.FormValue("query")
 
-		if queryOffset == "" {
-			queryOffset = "0"
-		}
-		if querySize == "" {
-			querySize = "20"
-		}
+		page, _ := strconv.Atoi(formPage)
+		sortOrder := sortOrderMap[formOrder]
+		query := formQuery
 
-		offset, _ := strconv.Atoi(queryOffset)
-		size, _ := strconv.Atoi(querySize)
-		sortOrder := SortOrderNewestFirst
-		if queryOrder == "oldest" {
-			sortOrder = SortOrderOldestFirst
-		}
+		pageSize := 10
+		offset := page * pageSize
 
-		entryInfo := GetEntryInfo(storage, offset, size, query, sortOrder)
+		entries := storage.QueryEntries(query, sortOrder, offset, pageSize)
+
+		entryInfo := EntryInfo{
+			Query:    formQuery,
+			Order:    formOrder,
+			Entries:  entries,
+			NextPage: page + 1,
+			HasMore:  pageSize == len(entries),
+		}
 
 		err := templateExecutor.ExecuteTemplate(response, "entry_items.gohtml", entryInfo)
 		if err != nil {

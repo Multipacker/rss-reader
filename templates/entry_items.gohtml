@@ -11,10 +11,10 @@
 {{ if .HasMore }}
 <span
     class="item"
+    style="text-align: center;"
     hx-trigger="intersect once"
     hx-swap="outerHTML"
-    hx-post="/entries?offset={{ .NextOffset }}&size={{ len .Entries }}{{ if .Query }}&query={{ .Query }}{{ end }}"
-    style="text-align: center;"
+    hx-post="/entries?page={{ .NextPage }}&query={{ .Query }}&order={{ .Order }}"
     >
     Loading...
 </span>

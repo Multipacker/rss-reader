@@ -294,7 +294,7 @@ type EntryDescription struct {
 	HighlightFeed  HighlightString
 }
 
-func (storage *Storage) QueryEntries(query string, sortOrder SortOrder) []EntryDescription {
+func (storage *Storage) QueryEntries(query string, sortOrder SortOrder, offset int, size int) []EntryDescription {
 	queryWords := strings.Fields(strings.ToLower(query))
 
 	// NOTE(simon): Collect entries to descriptions.
@@ -378,6 +378,9 @@ func (storage *Storage) QueryEntries(query string, sortOrder SortOrder) []EntryD
 
 		return result
 	})
+
+	// NOTE(simon): Limit to query range.
+	descriptions = descriptions[offset:min(offset + size, len(descriptions))]
 
 	return descriptions
 }
