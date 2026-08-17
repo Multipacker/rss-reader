@@ -172,7 +172,58 @@ type EntryDescription struct {
 	HighlightFeed  HighlightString
 }
 
+func highlightFromValueQuery(value string, queryWords []string) HighlightString {
+	type Range struct {
+		min, max int
+	}
+
+	lowerValue := strings.ToLower(value)
+
+	// NOTE(simon): Collect matches.
+	var matches []Range
+	for _, queryWord := range queryWords {
+		offset := 0
+		for {
+			start := offset + strings.Index(lowerValue[offset:], queryWord)
+			if start < offset {
+				break
+			}
+
+			matches = append(matches, Range{start, start + len(queryWord)})
+			offset = start + len(queryWord)
+		}
+	}
+
+	// NOTE(simon): Sort mathces on starting position.
+	slices.SortFunc(matches, func (a, b Range) int {
+		return a.min - b.min
+	})
+
+	// NOTE(simon): Build highlight string.
+	var highlight HighlightString
+	previousOffset := 0
+	for _, match := range matches {
+		if previousOffset < match.min {
+			highlight = append(highlight, HighlightPart{value[previousOffset:match.min], false})
+		}
+
+		// NOTE(simon): If we have overlapping matches, keep the first one.
+		if previousOffset <= match.min {
+			highlight = append(highlight, HighlightPart{value[match.min:match.max], true})
+
+			previousOffset = match.max
+		}
+	}
+	if previousOffset != len(value) {
+		highlight = append(highlight, HighlightPart{value[previousOffset:], false})
+	}
+
+	return highlight
+}
+
 func (storage *Storage) QueryEntries(query string) []EntryDescription {
+	queryWords := strings.Fields(strings.ToLower(query))
+
 	// NOTE(simon): Collect entries to descriptions.
 	descriptions := []EntryDescription{}
 	for _, entry := range storage.Entries() {
@@ -193,76 +244,30 @@ func (storage *Storage) QueryEntries(query string) []EntryDescription {
 		descriptions = append(descriptions, description)
 	}
 
-	queryWords := strings.Fields(strings.ToLower(query))
 	for i, description := range descriptions {
-		type Range struct {
-			min int
-			max int
-		}
-
-		lowerTitle := strings.ToLower(description.Title)
-
-		// NOTE(simon): Collect matches.
-		var matches []Range
-		for _, queryWord := range queryWords {
-			offset := 0
-			for {
-				start := offset + strings.Index(lowerTitle[offset:], queryWord)
-				if start < offset {
-					break
-				}
-
-				matches = append(matches, Range{start, start + len(queryWord)})
-				offset = start + len(queryWord)
-			}
-		}
-
-		// NOTE(simon): Sort mathces on starting position.
-		slices.SortFunc(matches, func (a, b Range) int {
-			return a.min - b.min
-		})
-
-		// NOTE(simon): Build highlight string.
-		previousOffset := 0
-		for _, match := range matches {
-			if previousOffset < match.min {
-				description.HighlightTitle = append(
-					description.HighlightTitle,
-					HighlightPart{Value: description.Title[previousOffset:match.min], Highlight: false},
-				)
-			}
-
-			// NOTE(simon): If we have overlapping matches, keep the first one.
-			if previousOffset <= match.min {
-				description.HighlightTitle = append(
-					description.HighlightTitle,
-					HighlightPart{Value: description.Title[match.min:match.max], Highlight: true},
-				)
-
-				previousOffset = match.max
-			}
-		}
-		if previousOffset != len(description.Title) {
-			description.HighlightTitle = append(
-				description.HighlightTitle,
-				HighlightPart{Value: description.Title[previousOffset:], Highlight: false},
-			)
-		}
-
+		description.HighlightTitle = highlightFromValueQuery(description.Title, queryWords)
+		description.HighlightFeed  = highlightFromValueQuery(description.Feed,  queryWords)
 		descriptions[i] = description
 	}
 
 	// NOTE(simon): Filter results.
 	filterOffset := 0
 	for _, description := range descriptions {
-		matches := 0
+		titleMatches := 0
 		for _, match := range description.HighlightTitle {
 			if match.Highlight {
-				matches++
+				titleMatches++
 			}
 		}
 
-		if matches >= len(queryWords) {
+		feedMatches := 0
+		for _, match := range description.HighlightFeed {
+			if match.Highlight {
+				feedMatches++
+			}
+		}
+
+		if titleMatches >= len(queryWords) || feedMatches >= len(queryWords) {
 			descriptions[filterOffset] = description
 			filterOffset++
 		}
@@ -275,6 +280,10 @@ func (storage *Storage) QueryEntries(query string) []EntryDescription {
 
 		if result == 0 {
 			result = len(b.HighlightTitle) - len(a.HighlightTitle)
+		}
+
+		if result == 0 {
+			result = len(b.HighlightFeed) - len(a.HighlightFeed)
 		}
 
 		if result == 0 {

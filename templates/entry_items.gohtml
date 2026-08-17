@@ -1,9 +1,11 @@
 {{ range .Entries }}
     <a class="item" href="{{ .Link }}" data-entry-id="{{ .Id }}">
         <p class="item-title">
-            {{ range .HighlightTitle }}{{ if .Highlight }}<mark>{{ .Value }}</mark>{{ else }}{{ .Value }}{{ end }}{{ end }}
+            {{ template "highlight_string.gohtml" .HighlightTitle }}
         </p>
-        <p class="item-description">{{ .Feed }} <time datetime={{ .Published }}>{{ .Published }}</time></p>
+        <p class="item-description">
+            {{ template "highlight_string.gohtml" .HighlightFeed }} <time datetime={{ .Published }}>{{ .Published }}</time>
+        </p>
     </a>
 {{ end }}
 {{ if .HasMore }}
