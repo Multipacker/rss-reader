@@ -152,8 +152,8 @@ func Parse(reader io.Reader, feedUrl string) (feed Feed, entries []Entry, err er
 		}
 
 		// NOTE(simon): Restructure to our internal format.
-		feed.Title       = rssFeed.Title
-		feed.Description = rssFeed.Description
+		feed.Title       = strings.TrimSpace(rssFeed.Title)
+		feed.Description = strings.TrimSpace(rssFeed.Description)
 		feed.Updated     = parseRssDateOrNow(rssFeed.LastBuildDate)
 		feed.Link        = feedUrl
 		for _, link := range rssFeed.Links {
@@ -167,7 +167,7 @@ func Parse(reader io.Reader, feedUrl string) (feed Feed, entries []Entry, err er
 		for _, item := range rssFeed.Items {
 			var entry Entry
 			entry.Feed  = feed.Id
-			entry.Title = item.Title
+			entry.Title = strings.TrimSpace(item.Title)
 
 			if _, err := url.Parse(item.Guid.Value); item.Guid.Value != "" && item.Guid.IsPermaLink != "false" && err == nil {
 				entry.Link = item.Guid.Value
@@ -219,8 +219,8 @@ func Parse(reader io.Reader, feedUrl string) (feed Feed, entries []Entry, err er
 		}
 
 		// NOTE(simon): Restructure to our internal format.
-		feed.Title       = atomFeed.Title
-		feed.Description = atomFeed.Subtitle
+		feed.Title       = strings.TrimSpace(atomFeed.Title)
+		feed.Description = strings.TrimSpace(atomFeed.Subtitle)
 		feed.Id          = atomFeed.Id
 		feed.Link        = feedUrl
 		for _, link := range atomFeed.Links {
@@ -233,8 +233,8 @@ func Parse(reader io.Reader, feedUrl string) (feed Feed, entries []Entry, err er
 
 		for _, atomEntry := range atomFeed.Entries {
 			var entry Entry
-			entry.Feed = feed.Id
-			entry.Title = atomEntry.Title
+			entry.Feed  = feed.Id
+			entry.Title = strings.TrimSpace(atomEntry.Title)
 			entry.Id    = atomEntry.Id
 			for _, link := range atomEntry.Links {
 				if link.Rel == "alternate" || link.Rel == "" {
