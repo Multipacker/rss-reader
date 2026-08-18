@@ -46,30 +46,9 @@ func handleIndex(templateExecutor TemplateExecutor, storage *Storage) http.Handl
 
 
 
-type FeedInfo struct {
-	Query       string
-	HasMore     bool
-	NextOffset  int
-	Feeds       []FeedDescription
-}
-
-func GetFeedInfo(storage *Storage, offset int, size int, query string) FeedInfo {
-	feeds := storage.QueryFeeds(query)
-
-	size = min(size, len(feeds) - offset)
-
-	return FeedInfo{
-		Query:      query,
-		Feeds:      feeds[offset:offset + size],
-		NextOffset: offset + size,
-		HasMore:    len(feeds) > offset + size,
-	}
-}
-
 func handleFeedsGet(templateExecutor TemplateExecutor, storage *Storage) http.Handler {
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		feedInfo := GetFeedInfo(storage, 0, 20, "")
-		err := templateExecutor.ExecuteTemplate(response, "feeds.gohtml", feedInfo)
+		err := templateExecutor.ExecuteTemplate(response, "feeds.gohtml", nil)
 		if err != nil {
 			log.Println(fmt.Errorf("execute template: %w", err))
 		}
@@ -77,22 +56,32 @@ func handleFeedsGet(templateExecutor TemplateExecutor, storage *Storage) http.Ha
 }
 
 func handleFeedsPost(templateExecutor TemplateExecutor, storage *Storage) http.Handler {
+	type FeedInfo struct {
+		Query string
+
+		HasMore  bool
+		NextPage int
+		Feeds    []FeedDescription
+	}
+
 	return http.HandlerFunc(func (response http.ResponseWriter, request *http.Request) {
-		queryOffset := request.FormValue("offset")
-		querySize := request.FormValue("size")
-		query := request.FormValue("query")
+		formPage := request.FormValue("page")
+		formQuery := request.FormValue("query")
 
-		if queryOffset == "" {
-			queryOffset = "0"
+		page, _ := strconv.Atoi(formPage)
+		query := formQuery
+
+		pageSize := 10
+		offset := page * pageSize
+
+		feeds := storage.QueryFeeds(query, offset, pageSize)
+
+		feedInfo := FeedInfo{
+			Query:    query,
+			Feeds:    feeds,
+			NextPage: page + 1,
+			HasMore:  pageSize == len(feeds),
 		}
-		if querySize == "" {
-			querySize = "20"
-		}
-
-		offset, _ := strconv.Atoi(queryOffset)
-		size, _ := strconv.Atoi(querySize)
-
-		feedInfo := GetFeedInfo(storage, offset, size, query)
 
 		err := templateExecutor.ExecuteTemplate(response, "feed_items.gohtml", feedInfo)
 		if err != nil {

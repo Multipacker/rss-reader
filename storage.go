@@ -206,7 +206,7 @@ type FeedDescription struct {
 	HighlightTitle HighlightString
 }
 
-func (storage *Storage) QueryFeeds(query string) []FeedDescription {
+func (storage *Storage) QueryFeeds(query string, offset int, size int) []FeedDescription {
 	queryWords := strings.Fields(strings.ToLower(query))
 
 	// NOTE(simon): Collect feeds to descriptions.
@@ -257,6 +257,9 @@ func (storage *Storage) QueryFeeds(query string) []FeedDescription {
 
 		return result
 	})
+
+	// NOTE(simon): Limit to query range.
+	descriptions = descriptions[offset:min(offset + size, len(descriptions))]
 
 	return descriptions
 }

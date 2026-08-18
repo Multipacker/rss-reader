@@ -9,10 +9,10 @@
 {{ if .HasMore }}
 <span
     class="item"
+    style="text-align: center;"
     hx-trigger="intersect once"
     hx-swap="outerHTML"
-    hx-post="/feeds?offset={{ .NextOffset }}&size={{ len .Feeds }}{{ if .Query }}&query={{ .Query }}{{ end }}"
-    style="text-align: center;"
+    hx-post="/feeds?page={{ .NextPage }}&query={{ .Query }}"
     >
     Loading...
 </span>

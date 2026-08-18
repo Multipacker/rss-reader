@@ -13,9 +13,20 @@
     <body style="margin: 0;">
         <main style="display: flex; flex-direction: column; gap: 0.5em;">
             <h1 style="text-align: center; margin-bottom: 0;">RSS Feed</h1>
-            <input id="search" name="query" placeholder="Search..." type="search" hx-trigger="search, keyup changed delay:200ms" hx-post="/feeds" hx-target="#results" hx-swap="innerHTML scroll:top">
+
+            <input name="query" placeholder="Search..." type="search" hx-trigger="search, keyup changed delay:200ms" hx-post="/feeds" hx-target="#results" hx-swap="innerHTML scroll:top">
+
             <div id="results">
-                {{ template "feed_items.gohtml" . }}
+                <span
+                    class="item"
+                    style="text-align: center;"
+                    hx-trigger="load"
+                    hx-swap="outerHTML"
+                    hx-post="/feeds"
+                    hx-include="previous input"
+                    >
+                    Loading...
+                </span>
             </div>
         </main>
     </body>
