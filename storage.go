@@ -424,8 +424,6 @@ func (storage *Storage) saveSnapshots() error {
 		return fmt.Errorf("atomic write file snapshots: %w", err)
 	}
 
-	storage.snapshotLock.Lock()
-	defer storage.snapshotLock.Unlock()
 	encodedSnapshotPoints, err := json.Marshal(storage.snapshotPoints)
 	if err != nil {
 		return fmt.Errorf("json marshal snapshot points: %w", err)
