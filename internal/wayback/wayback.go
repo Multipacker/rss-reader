@@ -18,21 +18,21 @@ const (
 	TimeFormat string = "20060102030405"
 )
 
-func FetchSnapshot(url, date string) (response *http.Response, err error) {
+func FetchSnapshot(url, date string) (*http.Response, error) {
 	// TODO(simon): Honor 429 Too Many Requests and Retry-After
 
 	request, err := http.NewRequest("GET", "https://web.archive.org/web/" + date + "id_/" + url, nil)
 	if err != nil {
-		return
+		return nil, err
 	}
 
 	request.Header.Set("User-Agent", "SilverFeed/1.0")
 
-	response, err = http.DefaultClient.Do(request)
-	return
+	response, err := http.DefaultClient.Do(request)
+	return response, err
 }
 
-func QuerySnapshots(feedUrl string, lastPollTime time.Time) (snapshots []Snapshot, err error) {
+func QuerySnapshots(feedUrl string, lastPollTime time.Time) ([]Snapshot, error) {
 	// NOTE(simon): Always valid so skip the error.
 	requestUrl, _ := url.Parse("http://web.archive.org/cdx/search/cdx")
 
@@ -53,23 +53,17 @@ func QuerySnapshots(feedUrl string, lastPollTime time.Time) (snapshots []Snapsho
 	exponentialBackoffBase  := 1 * time.Minute
 	exponentialBackoffTries := 0
 
+	var snapshots []Snapshot
 	for {
 		// NOTE(simon): Setup request with custom headers.
 		requestUrl.RawQuery = query.Encode()
-
-		var request *http.Request
-		request, err = http.NewRequest("GET", requestUrl.String(), nil)
-		if err != nil {
-			return
-		}
-
+		request, _ := http.NewRequest("GET", requestUrl.String(), nil)
 		request.Header.Set("User-Agent", "SilverFeed/1.0")
 
 		// NOTE(simon): Issue request with query.
-		var response *http.Response
-		response, err = http.DefaultClient.Do(request)
+		response, err := http.DefaultClient.Do(request)
 		if err != nil {
-			return
+			return nil, fmt.Errorf("http do: %v", err)
 		}
 		defer response.Body.Close()
 
@@ -77,33 +71,21 @@ func QuerySnapshots(feedUrl string, lastPollTime time.Time) (snapshots []Snapsho
 		if response.StatusCode == http.StatusTooManyRequests {
 			response.Body.Close()
 
-			var waitDuration time.Duration
-			var retryErr error
+			// NOTE(simon): Try to parse Retry-After as a duration.
+			waitDuration, retryErr := time.ParseDuration(response.Header.Get("Retry-After") + "s")
 
-			// NOTE(simon): Try to parse the Retry-After header.
-			if retryAfter := response.Header["Retry-After"]; len(retryAfter) > 0 {
-				retryAfter := retryAfter[0]
-
-				// NOTE(simon): Try to parse it as a duration.
-				waitDuration, retryErr = time.ParseDuration(retryAfter + "s")
-
-				if retryErr != nil {
-					// NOTE(simon): Try to parse it as a specific date.
-					retryDate, retryErr := http.ParseTime(retryAfter)
-					if retryErr == nil {
-						waitDuration = time.Until(retryDate)
-					}
+			// NOTE(simon): Try to parse Retry-After as a specific date.
+			if retryErr != nil {
+				if retryDate, retryErr := http.ParseTime(response.Header.Get("Retry-After")); retryErr == nil {
+					waitDuration = time.Until(retryDate)
 				}
-			} else {
-				retryErr = fmt.Errorf("Header is not present")
 			}
 
 			// NOTE(simon): We somehow failed to parse the date, use exponential backoff.
 			if retryErr != nil {
 				// NOTE(simon): Arbitrary decision to abort after 5 failed attempts of exponential backoff.
 				if exponentialBackoffTries > 5 {
-					err = fmt.Errorf("Received %v after %v attempts of exponential backoff", response.Status, exponentialBackoffTries)
-					return
+					return nil, fmt.Errorf("Received %v after %v attempts of exponential backoff", response.Status, exponentialBackoffTries)
 				}
 
 				waitDuration = exponentialBackoffBase * (1 << exponentialBackoffTries)
@@ -114,8 +96,7 @@ func QuerySnapshots(feedUrl string, lastPollTime time.Time) (snapshots []Snapsho
 			time.Sleep(waitDuration)
 			continue
 		} else if response.StatusCode != http.StatusOK {
-			err = fmt.Errorf("GET %v", response.Status)
-			return
+			return nil, fmt.Errorf("http do: %v", response.Status)
 		}
 
 		// NOTE(simon): We got a response! Reset backoff time in the hopes of faster answers.
@@ -126,31 +107,34 @@ func QuerySnapshots(feedUrl string, lastPollTime time.Time) (snapshots []Snapsho
 		var records [][]string
 		err = json.NewDecoder(response.Body).Decode(&records)
 		if err != nil {
-			return
+			return nil, err
 		}
 		response.Body.Close()
 
-		recordCount := len(records)
-
-		// NOTE(simon): We need at least two lines to continue: The header, and
+		// NOTE(simon): We need at least two lines to continue: the header, and
 		// at least one record.
-		if recordCount < 2 {
+		if len(records) < 2 {
 			break
 		}
+
+		// NOTE(simon): Skip the header describing the fields, we request them
+		// in a specific order anyway.
+		records = records[1:]
 
 		// NOTE(simon): Parse resume key if we have one. It is identified by
 		// the second last record being empty and the last one containing the
 		// resume key.
 		resumeKey := ""
-		hasResumeKey := len(records[recordCount - 2]) == 0 && len(records[recordCount - 1]) == 1
-		if hasResumeKey {
-			resumeKey = records[recordCount - 1][0]
-			recordCount -= 2
+		if len(records) >= 2 {
+			footer := records[len(records) - 2:]
+			if len(footer[0]) == 0 && len(footer[1]) == 1 {
+				resumeKey = footer[1][0]
+				records = records[:len(records) - 2]
+			}
 		}
 
-		// NOTE(simon): Parse records, the first line has a header with field
-		// names, skip it and the footer with the resume key.
-		for _, line := range records[1:recordCount] {
+		// NOTE(simon): Parse records
+		for _, line := range records {
 			// NOTE(simon): We expect two items per line.
 			if len(line) < 2 {
 				continue
@@ -177,5 +161,5 @@ func QuerySnapshots(feedUrl string, lastPollTime time.Time) (snapshots []Snapsho
 		}
 	}
 
-	return
+	return snapshots, nil
 }
