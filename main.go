@@ -46,6 +46,11 @@ func pollUrl(url string) (response *http.Response, changed bool, err error) {
 		request.Header.Add("If-None-Match", meta.Etag)
 	}
 
+	// NOTE(simon): Content negotiation
+	request.Header.Add("Accept", "application/rss+xml")
+	request.Header.Add("Accept", "application/atom+xml")
+	request.Header.Add("Accept", "application/xml")
+
 	response, err = (&http.Client{}).Do(request)
 	if err != nil {
 		return
