@@ -160,7 +160,7 @@ func QuerySnapshots(feedUrl string, lastPollTime time.Time) (snapshots []Snapsho
 			mimetype := line[1]
 
 			// NOTE(simon): Do we have a valid mimetype?
-			if strings.Contains(mimetype, "application/xml") || strings.Contains(mimetype, "application/rss") {
+			if strings.Contains(mimetype, "application/xml") || strings.Contains(mimetype, "application/rss") || strings.Contains(mimetype, "application/atom") {
 				snapshots = append(snapshots, Snapshot{
 					Url: feedUrl,
 					Date: date,
