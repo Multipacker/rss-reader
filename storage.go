@@ -3,15 +3,12 @@ package main
 import (
 	"context"
 	"embed"
-	"encoding/json"
 	"fmt"
 	"io/fs"
 	"log"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"Multipacker/rss-reader/internal/feedparse"
@@ -31,47 +28,11 @@ const (
 )
 
 type Storage struct {
-	path string
-	snapshots []wayback.Snapshot
-	snapshotPoints map[string]time.Time
-	snapshotLock sync.Mutex
 	db *pgxpool.Pool
 }
 
 func createStorage(path string) (*Storage, error) {
-	// NOTE(simon): Ensure that the output directory exists.
-	if path != "" {
-		err := os.MkdirAll(path, 0755)
-		if err != nil {
-			return nil, err
-		}
-	}
-
 	storage := new(Storage)
-	storage.path = path
-	storage.snapshotPoints = make(map[string]time.Time)
-
-	// NOTE(simon): Load old snapshots.
-	snapshotsContent, err := os.ReadFile(filepath.Join(storage.path, "snapshots.json"))
-	if err == nil {
-		err = json.Unmarshal(snapshotsContent, &storage.snapshots)
-		if err != nil {
-			return nil, fmt.Errorf("json unmarshal snapshots: %w", err)
-		}
-	} else if !os.IsNotExist(err) {
-		return nil, fmt.Errorf("read file snapshots: %w", err)
-	}
-
-	// NOTE(simon): Load old snapshot points.
-	snapshotPointsContent, err := os.ReadFile(filepath.Join(storage.path, "snapshotPoints.json"))
-	if err == nil {
-		err = json.Unmarshal(snapshotPointsContent, &storage.snapshotPoints)
-		if err != nil {
-			return nil, fmt.Errorf("json unmarshal snapshot points: %w", err)
-		}
-	} else if !os.IsNotExist(err) {
-		return nil, fmt.Errorf("read file snapshot points: %w", err)
-	}
 
 	// NOTE(simon): Open database connection
 	pool, err := pgxpool.New(context.Background(), os.Getenv("DATABASE_URL"))
@@ -94,43 +55,57 @@ func createStorage(path string) (*Storage, error) {
 }
 
 func (storage *Storage) storeFeed(feed feedparse.Feed, entries []feedparse.Entry) {
+	storage.storeFeedSnapshot(wayback.Snapshot{}, feed, entries)
+}
+
+func (storage *Storage) storeFeedSnapshot(snapshot wayback.Snapshot, feed feedparse.Feed, entries []feedparse.Entry) {
 	transaction, err := storage.db.Begin(context.Background())
 	if err != nil {
 		log.Println(err)
 	}
 	defer transaction.Rollback(context.Background())
 
-	feedSql :=  `
-		INSERT INTO Feeds (externalId, title, description, url, updated) VALUES (@id, @title, @description, @url, @updated)
-		ON CONFLICT (externalId) DO UPDATE SET title = @title, description = @description, url = @url, updated = @updated WHERE Feeds.updated < @updated
-	`
-	_, err = transaction.Exec(context.Background(), feedSql, pgx.NamedArgs{
-		"id":          feed.Id,
-		"title":       feed.Title,
-		"description": feed.Description,
-		"url":         feed.Link,
-		"updated":     feed.Updated,
-	})
-	if err != nil {
-		log.Println(err)
+	batch := pgx.Batch{}
+	if snapshot.Date != "" {
+		batch.Queue(
+			"DELETE FROM UnfetchedSnapshots WHERE url = @url AND timestamp = @timestamp",
+			pgx.NamedArgs{
+				"url":       snapshot.Url,
+				"timestamp": snapshot.Date,
+			},
+		)
 	}
 
+	batch.Queue(
+		`INSERT INTO Feeds (externalId, title, description, url, updated) VALUES (@id, @title, @description, @url, @updated)
+		ON CONFLICT (externalId) DO UPDATE SET title = @title, description = @description, url = @url, updated = @updated WHERE Feeds.updated < @updated`,
+		pgx.NamedArgs{
+			"id":          feed.Id,
+			"title":       feed.Title,
+			"description": feed.Description,
+			"url":         feed.Link,
+			"updated":     feed.Updated,
+		},
+	)
+
 	for _, entry := range entries {
-		entrySql := `
-			INSERT INTO Entries (feed, externalId, title, url, published, updated) VALUES ((SELECT id FROM Feeds WHERE externalId = @feed), @id, @title, @url, @published, @updated)
-			ON CONFLICT (externalId) DO UPDATE SET title = @title, url = @url, updated = @updated WHERE Entries.updated < @updated;
-		`
-		_, err := transaction.Exec(context.Background(), entrySql, pgx.NamedArgs{
-			"id":          entry.Id,
-			"feed":        feed.Id,
-			"title":       entry.Title,
-			"url":         entry.Link,
-			"published":   entry.Updated,
-			"updated":     entry.Updated,
-		})
-		if err != nil {
-			log.Println(err)
-		}
+		batch.Queue(
+			`INSERT INTO Entries (feed, externalId, title, url, published, updated) VALUES ((SELECT id FROM Feeds WHERE externalId = @feed), @id, @title, @url, @published, @updated)
+			ON CONFLICT (externalId) DO UPDATE SET title = @title, url = @url, updated = @updated WHERE Entries.updated < @updated`,
+			pgx.NamedArgs{
+				"id":          entry.Id,
+				"feed":        feed.Id,
+				"title":       entry.Title,
+				"url":         entry.Link,
+				"published":   entry.Published,
+				"updated":     entry.Updated,
+			},
+		)
+	}
+
+	err = transaction.SendBatch(context.Background(), &batch).Close()
+	if err != nil {
+		log.Println(err)
 	}
 	transaction.Commit(context.Background())
 }
@@ -278,11 +253,6 @@ func (storage *Storage) Feeds() []feedparse.Feed {
 	return feeds
 }
 
-func (storage *Storage) jsonFromFeeds() ([]byte, error) {
-	feeds := storage.Feeds()
-	return json.Marshal(feeds)
-}
-
 
 
 type EntryDescription struct {
@@ -300,23 +270,26 @@ func (storage *Storage) QueryEntries(query string, sortOrder SortOrder, offset i
 	queryWords := strings.Fields(strings.ToLower(query))
 
 	// NOTE(simon): Collect entries to descriptions.
-	descriptions := []EntryDescription{}
-	for _, entry := range storage.Entries() {
-		var feedTitle string
-		//if feedInstance, ok := storage.feeds.Load(entry.Feed); ok {
-			//feed := feedInstance.(feedparse.Feed)
-			//feedTitle = feed.Title
-		//}
+	entryQuery := `
+		SELECT
+			Entries.title     AS title,
+			Feeds.title       AS feed,
+			Entries.id        AS id,
+			Entries.published AS published
+		FROM
+			Entries JOIN Feeds ON feed = Feeds.id
+		ORDER BY published
+	`
+	rows, err := storage.db.Query(context.Background(), entryQuery)
+	if err != nil {
+		log.Println(err)
+		return nil
+	}
 
-		description := EntryDescription{
-			Title: entry.Title,
-			Feed: feedTitle,
-			Link: entry.Link,
-			Id: entry.Id,
-			Published: entry.Published,
-		}
-
-		descriptions = append(descriptions, description)
+	descriptions, err := pgx.CollectRows(rows, pgx.RowToStructByNameLax[EntryDescription])
+	if err != nil {
+		log.Println(err)
+		return nil
 	}
 
 	for i, description := range descriptions {
@@ -388,8 +361,7 @@ func (storage *Storage) QueryEntries(query string, sortOrder SortOrder, offset i
 }
 
 func (storage *Storage) Entries() []feedparse.Entry {
-	query := `SELECT id, feed, title, url AS link, updated, published FROM Entries ORDER BY published`
-	rows, err := storage.db.Query(context.Background(), query)
+	rows, err := storage.db.Query(context.Background(), "SELECT id, feed, title, url AS link, updated, published FROM Entries")
 	if err != nil {
 		log.Println(err)
 		return nil
@@ -404,106 +376,76 @@ func (storage *Storage) Entries() []feedparse.Entry {
 	return entries
 }
 
-func (storage *Storage) jsonFromEntries() ([]byte, error) {
-	entries := storage.Entries()
-	return json.Marshal(entries)
-}
 
 
-
-func (storage *Storage) saveSnapshots() error {
-	storage.snapshotLock.Lock()
-	defer storage.snapshotLock.Unlock()
-
-	encodedSnapshots, err := json.Marshal(storage.snapshots)
+func (storage *Storage) addSnapshots(url string, timestamp time.Time, snapshots []wayback.Snapshot) error {
+	transaction, err := storage.db.Begin(context.Background())
 	if err != nil {
-		return fmt.Errorf("json marshal snapshots: %w", err)
+		return err
 	}
+	defer transaction.Rollback(context.Background())
 
-	err = atomicWriteFile(filepath.Join(storage.path, "snapshots.json"), encodedSnapshots)
+	_, err = transaction.Exec(
+		context.Background(),
+		`INSERT INTO SnapshotTimes VALUES (@url, @timestamp) ON CONFLICT (url) DO UPDATE SET updated = @timestamp`,
+		pgx.NamedArgs{
+			"url":       url,
+			"timestamp": timestamp,
+		},
+	)
 	if err != nil {
-		return fmt.Errorf("atomic write file snapshots: %w", err)
+		return err
 	}
 
-	encodedSnapshotPoints, err := json.Marshal(storage.snapshotPoints)
+	batch := pgx.Batch{}
+	for _, snapshot := range snapshots {
+		batch.Queue(
+			"INSERT INTO UnfetchedSnapshots VALUES (@url, @timestamp) ON CONFLICT DO NOTHING",
+			pgx.NamedArgs{
+				"url":       snapshot.Url,
+				"timestamp": snapshot.Date,
+			},
+		)
+	}
+
+	err = transaction.SendBatch(context.Background(), &batch).Close()
 	if err != nil {
-		return fmt.Errorf("json marshal snapshot points: %w", err)
+		return err
 	}
 
-	err = atomicWriteFile(filepath.Join(storage.path, "snapshotPoints.json"), encodedSnapshotPoints)
-	if err != nil {
-		return fmt.Errorf("atomic write file snapshot points: %w", err)
-	}
-
-	return nil
-}
-
-func (storage *Storage) addSnapshots(snapshots []wayback.Snapshot) {
-	slices.SortFunc(snapshots, func (a, b wayback.Snapshot) int {
-		return strings.Compare(a.Date, b.Date)
-	})
-
-	storage.snapshotLock.Lock()
-	defer storage.snapshotLock.Unlock()
-
-	// NOTE(simon): Merge arrays.
-	merged := []wayback.Snapshot{}
-	i, j := 0, 0
-	for i < len(storage.snapshots) && j < len(snapshots) {
-		if storage.snapshots[i].Date < snapshots[j].Date {
-			merged = append(merged, storage.snapshots[i])
-			i += 1
-		} else {
-			merged = append(merged, snapshots[j])
-			j += 1
-		}
-	}
-
-	// NOTE(simon): Append remaining.
-	merged = append(merged, storage.snapshots[i:]...)
-	merged = append(merged, snapshots[j:]...)
-
-	storage.snapshots = merged
-}
-
-func (storage *Storage) updateSnapshotTime(link string, time time.Time) {
-	storage.snapshotLock.Lock()
-	storage.snapshotPoints[link] = time
-	storage.snapshotLock.Unlock()
+	err = transaction.Commit(context.Background())
+	return err
 }
 
 func (storage *Storage) getLatestSnapshotTime(link string) time.Time {
-	storage.snapshotLock.Lock()
-	defer storage.snapshotLock.Unlock()
-	return storage.snapshotPoints[link]
+	timestamp := time.Time{}
+	err := storage.db.QueryRow(context.Background(), "SELECT updated FROM SnapshotTimes WHERE url = $1", link).Scan(&timestamp)
+	if err != nil {
+		return time.Time{}
+	}
+
+	return timestamp
 }
 
-
-
-func atomicWriteFile(file string, data []byte) error {
-	directory, _ := filepath.Split(file)
-
-	tempFile, err := os.CreateTemp(directory, "temp-*.json")
+func (storage *Storage) getLatestSnapshot() wayback.Snapshot {
+	query := "SELECT * FROM UnfetchedSnapshots ORDER BY timestamp DESC LIMIT 1"
+	snapshot := wayback.Snapshot{}
+	err := storage.db.QueryRow(context.Background(), query).Scan(&snapshot.Url, &snapshot.Date)
 	if err != nil {
-		return fmt.Errorf("create temporary: %w", err)
+		log.Println(err)
 	}
-	defer os.Remove(tempFile.Name())
-	defer tempFile.Close()
+	return snapshot
+}
 
-	if _, err = tempFile.Write(data); err != nil {
-		return fmt.Errorf("write: %w", err)
-	}
-	if err = tempFile.Sync(); err != nil {
-		return fmt.Errorf("sync: %w", err)
-	}
-	if err = tempFile.Close(); err != nil {
-		return fmt.Errorf("close: %w", err)
-	}
+func (storage *Storage) pushSnapshot(snapshot wayback.Snapshot) error {
+	_, err := storage.db.Exec(
+		context.Background(),
+		"INSERT INTO UnfetchedSnapshots VALUES (@url, @timestamp)",
+		pgx.NamedArgs{
+			"url":       snapshot.Url,
+			"timestamp": snapshot.Date,
+		},
+	)
 
-	err = os.Rename(tempFile.Name(), file)
-	if err != nil {
-		return fmt.Errorf("rename: %w", err)
-	}
-
-	return nil
+	return err
 }

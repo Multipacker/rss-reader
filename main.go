@@ -7,8 +7,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"slices"
-	"strings"
 	"sync"
 	"time"
 
@@ -143,15 +141,7 @@ func updateFeeds(client *http.Client, storage *Storage) {
 }
 
 func fetchWaybackEntry(client *http.Client, storage *Storage) {
-	// NOTE(simon): Pop the latest snapshot.
-	var snapshot wayback.Snapshot
-	storage.snapshotLock.Lock()
-	snapshotCount := len(storage.snapshots)
-	if snapshotCount > 0 {
-		snapshot = storage.snapshots[snapshotCount - 1]
-		storage.snapshots = storage.snapshots[:snapshotCount - 1]
-	}
-	storage.snapshotLock.Unlock()
+	snapshot := storage.getLatestSnapshot()
 
 	// NOTE(simon): No snapshots left? Quit
 	if snapshot.Date == "" {
@@ -165,12 +155,6 @@ func fetchWaybackEntry(client *http.Client, storage *Storage) {
 	// NOTE(simon): We failed to fetch the entry, requeue it for later processing.
 	if err != nil {
 		log.Printf("ERROR %v (%v): %v\n", snapshot.Url, snapshot.Date, err)
-		storage.snapshotLock.Lock()
-		i, _ := slices.BinarySearchFunc(storage.snapshots, snapshot, func (a, b wayback.Snapshot) int {
-			return strings.Compare(a.Date, b.Date)
-		})
-		storage.snapshots = slices.Insert(storage.snapshots, i, snapshot)
-		storage.snapshotLock.Unlock()
 		return
 	}
 	defer response.Body.Close()
@@ -189,12 +173,7 @@ func fetchWaybackEntry(client *http.Client, storage *Storage) {
 		return
 	}
 
-	storage.storeFeed(feed, entries)
-
-	snapshotsErr := storage.saveSnapshots()
-	if snapshotsErr != nil {
-		log.Print(snapshotsErr)
-	}
+	storage.storeFeedSnapshot(snapshot, feed, entries)
 }
 
 func update(client *http.Client, storage *Storage) {
@@ -283,13 +262,10 @@ func main() {
 			}
 			log.Printf("Got %v new snapthots for %v\n", len(snapshots), link)
 
-			storage.addSnapshots(snapshots)
-			storage.updateSnapshotTime(link, timeBeforePoll)
-		}
-
-		snapshotsErr := storage.saveSnapshots()
-		if snapshotsErr != nil {
-			log.Print(snapshotsErr)
+			err = storage.addSnapshots(link, timeBeforePoll, snapshots)
+			if err != nil {
+				log.Printf("ERROR %v: %v\n", link, fmt.Errorf("storage addSnapshots: %w", err))
+			}
 		}
 	}()
 
