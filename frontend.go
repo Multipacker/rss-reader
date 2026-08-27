@@ -8,6 +8,8 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+
+	"github.com/klauspost/compress/gzhttp"
 )
 
 
@@ -168,6 +170,11 @@ func runFrontend(reload bool, config Config, storage *Storage) {
 		templateExecutor = template.Must(template.ParseFS(templateFiles, "**/*.gohtml"))
 	}
 
+	gzWrapper, err := gzhttp.NewWrapper()
+	if err != nil {
+		log.Fatalln(err)
+	}
+
 	// NOTE(simon): Setup and start the server.
 	http.Handle("/", handleIndex(templateExecutor, storage))
 	http.Handle("/static/", staticHandler)
@@ -178,7 +185,7 @@ func runFrontend(reload bool, config Config, storage *Storage) {
 
 	address := fmt.Sprintf("%s:%d", config.Host, config.Port)
 	log.Printf("INFO: Serving on http://%s", address)
-	if err := http.ListenAndServe(address, middlewareLogging(log.Default(), http.DefaultServeMux)); err != nil {
+	if err := http.ListenAndServe(address, middlewareLogging(log.Default(), gzWrapper(http.DefaultServeMux))); err != nil {
 		log.Fatal(err)
 	}
 }
