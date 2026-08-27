@@ -1,8 +1,11 @@
 package main
 
 import (
+	"context"
+	"embed"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -13,7 +16,13 @@ import (
 
 	"Multipacker/rss-reader/internal/feedparse"
 	"Multipacker/rss-reader/internal/wayback"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+//go:embed all:sql
+var sqlFiles embed.FS
 
 type SortOrder int
 const (
@@ -23,11 +32,10 @@ const (
 
 type Storage struct {
 	path string
-	feeds sync.Map
-	entries sync.Map
 	snapshots []wayback.Snapshot
 	snapshotPoints map[string]time.Time
 	snapshotLock sync.Mutex
+	db *pgxpool.Pool
 }
 
 func createStorage(path string) (*Storage, error) {
@@ -42,36 +50,6 @@ func createStorage(path string) (*Storage, error) {
 	storage := new(Storage)
 	storage.path = path
 	storage.snapshotPoints = make(map[string]time.Time)
-
-	// NOTE(simon): Load old feeds.
-	feedsContent, err := os.ReadFile(filepath.Join(storage.path, "feeds.json"))
-	if err == nil {
-		var feeds []feedparse.Feed
-		err = json.Unmarshal(feedsContent, &feeds)
-		if err != nil {
-			return nil, fmt.Errorf("json unmarshal feeds: %w", err)
-		}
-		for _, feed := range feeds {
-			storage.feeds.Store(feed.Id, feed)
-		}
-	} else if !os.IsNotExist(err) {
-		return nil, fmt.Errorf("read file feeds: %w", err)
-	}
-
-	// NOTE(simon): Load old entries.
-	entriesContent, err := os.ReadFile(filepath.Join(storage.path, "entries.json"))
-	if err == nil {
-		var entries []feedparse.Entry
-		err = json.Unmarshal(entriesContent, &entries)
-		if err != nil {
-			return nil, fmt.Errorf("json unmarshal entries: %w", err)
-		}
-		for _, entry := range entries {
-			storage.entries.Store(entry.Id, entry)
-		}
-	} else if !os.IsNotExist(err) {
-		return nil, fmt.Errorf("read file entries: %w", err)
-	}
 
 	// NOTE(simon): Load old snapshots.
 	snapshotsContent, err := os.ReadFile(filepath.Join(storage.path, "snapshots.json"))
@@ -95,47 +73,66 @@ func createStorage(path string) (*Storage, error) {
 		return nil, fmt.Errorf("read file snapshot points: %w", err)
 	}
 
+	// NOTE(simon): Open database connection
+	pool, err := pgxpool.New(context.Background(), os.Getenv("DATABASE_URL"))
+	if err != nil {
+		return nil, fmt.Errorf("pgxpool new: %w", err)
+	}
+	storage.db = pool
+
+	init, err := fs.ReadFile(sqlFiles, "sql/init.sql")
+	if err != nil {
+		return nil, fmt.Errorf("fs read file: %w", err)
+	}
+
+	_, err = storage.db.Exec(context.Background(), string(init))
+	if err != nil {
+		log.Printf("ERROR %v\n", fmt.Errorf("storage db exec: %w", err))
+	}
+
 	return storage, nil
 }
 
 func (storage *Storage) storeFeed(feed feedparse.Feed, entries []feedparse.Entry) {
-	// NOTE(simon): Update stores.
-	// TODO(simon): Only do this if the date is newer.
-	storage.feeds.Store(feed.Id, feed)
+	transaction, err := storage.db.Begin(context.Background())
+	if err != nil {
+		log.Println(err)
+	}
+	defer transaction.Rollback(context.Background())
 
-	// NOTE(simon): Update entries.
-	for _, newEntry := range entries {
-		updateEntry := true
+	feedSql :=  `
+		INSERT INTO Feeds (externalId, title, description, url, updated) VALUES (@id, @title, @description, @url, @updated)
+		ON CONFLICT (externalId) DO UPDATE SET title = @title, description = @description, url = @url, updated = @updated WHERE Feeds.updated < @updated
+	`
+	_, err = transaction.Exec(context.Background(), feedSql, pgx.NamedArgs{
+		"id":          feed.Id,
+		"title":       feed.Title,
+		"description": feed.Description,
+		"url":         feed.Link,
+		"updated":     feed.Updated,
+	})
+	if err != nil {
+		log.Println(err)
+	}
 
-		// NOTE(simon): Merge with existing entry (keep the publish date).
-		if entryInstance, hasEntry := storage.entries.Load(newEntry.Id); hasEntry {
-			oldEntry := entryInstance.(feedparse.Entry)
-
-			newEntry.Published = oldEntry.Published
-			updateEntry = oldEntry.Updated.Before(newEntry.Updated)
+	for _, entry := range entries {
+		entrySql := `
+			INSERT INTO Entries (feed, externalId, title, url, published, updated) VALUES ((SELECT id FROM Feeds WHERE externalId = @feed), @id, @title, @url, @published, @updated)
+			ON CONFLICT (externalId) DO UPDATE SET title = @title, url = @url, updated = @updated WHERE Entries.updated < @updated;
+		`
+		_, err := transaction.Exec(context.Background(), entrySql, pgx.NamedArgs{
+			"id":          entry.Id,
+			"feed":        feed.Id,
+			"title":       entry.Title,
+			"url":         entry.Link,
+			"published":   entry.Updated,
+			"updated":     entry.Updated,
+		})
+		if err != nil {
+			log.Println(err)
 		}
-
-		if updateEntry {
-			storage.entries.Store(newEntry.Id, newEntry)
-		}
 	}
-
-	// NOTE(simon): Serialize to disk.
-	encodedFeeds,   feedsErr   := storage.jsonFromFeeds()
-	encodedEntries, entriesErr := storage.jsonFromEntries()
-	if feedsErr == nil {
-		feedsErr = atomicWriteFile(filepath.Join(storage.path, "feeds.json"), encodedFeeds)
-		if feedsErr == nil && entriesErr == nil {
-			entriesErr = atomicWriteFile(filepath.Join(storage.path, "entries.json"), encodedEntries)
-		}
-	}
-
-	if feedsErr != nil {
-		log.Printf("ERROR: Could not save feeds: %v\n", feedsErr)
-	}
-	if entriesErr != nil {
-		log.Printf("ERROR: Could not save entries: %v\n", entriesErr)
-	}
+	transaction.Commit(context.Background())
 }
 
 
@@ -265,16 +262,18 @@ func (storage *Storage) QueryFeeds(query string, offset int, size int) []FeedDes
 }
 
 func (storage *Storage) Feeds() []feedparse.Feed {
-	// NOTE(simon): Collect all entries.
-	var feeds []feedparse.Feed
-	for _, feedInstance := range storage.feeds.Range {
-		feed := feedInstance.(feedparse.Feed)
-		feeds = append(feeds, feed)
+	query := `SELECT (id, title, description, url as link, updated) FROM Feeds ORDER BY title`
+	rows, err := storage.db.Query(context.Background(), query)
+	if err != nil {
+		log.Println(err)
+		return nil
 	}
 
-	slices.SortFunc(feeds, func (a, b feedparse.Feed) int {
-		return strings.Compare(a.Title, b.Title)
-	})
+	feeds, err := pgx.CollectRows(rows, pgx.RowToStructByName[feedparse.Feed])
+	if err != nil {
+		log.Println(err)
+		return nil
+	}
 
 	return feeds
 }
@@ -304,10 +303,10 @@ func (storage *Storage) QueryEntries(query string, sortOrder SortOrder, offset i
 	descriptions := []EntryDescription{}
 	for _, entry := range storage.Entries() {
 		var feedTitle string
-		if feedInstance, ok := storage.feeds.Load(entry.Feed); ok {
-			feed := feedInstance.(feedparse.Feed)
-			feedTitle = feed.Title
-		}
+		//if feedInstance, ok := storage.feeds.Load(entry.Feed); ok {
+			//feed := feedInstance.(feedparse.Feed)
+			//feedTitle = feed.Title
+		//}
 
 		description := EntryDescription{
 			Title: entry.Title,
@@ -389,16 +388,18 @@ func (storage *Storage) QueryEntries(query string, sortOrder SortOrder, offset i
 }
 
 func (storage *Storage) Entries() []feedparse.Entry {
-	// NOTE(simon): Collect all entries.
-	var entries []feedparse.Entry
-	for _, entryInstance := range storage.entries.Range {
-		entry := entryInstance.(feedparse.Entry)
-		entries = append(entries, entry)
+	query := `SELECT id, feed, title, url AS link, updated, published FROM Entries ORDER BY published`
+	rows, err := storage.db.Query(context.Background(), query)
+	if err != nil {
+		log.Println(err)
+		return nil
 	}
 
-	slices.SortFunc(entries, func (a, b feedparse.Entry) int {
-		return b.Published.Compare(a.Published)
-	})
+	entries, err := pgx.CollectRows(rows, pgx.RowToStructByName[feedparse.Entry])
+	if err != nil {
+		log.Println(err)
+		return nil
+	}
 
 	return entries
 }
