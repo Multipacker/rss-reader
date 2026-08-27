@@ -145,7 +145,14 @@ func QuerySnapshots(client *http.Client, feedUrl string, lastPollTime time.Time)
 			mimetype := line[1]
 
 			// NOTE(simon): Do we have a valid mimetype?
-			if strings.Contains(mimetype, "application/xml") || strings.Contains(mimetype, "application/rss") || strings.Contains(mimetype, "application/atom") {
+			mimeType, mimeSubtype, _ := strings.Cut(mimetype, "/")
+			hasValidType := slices.ContainsFunc([]string{ "application", "text" }, func(accepted string) bool {
+				return strings.Contains(mimeType, accepted)
+			})
+			hasValidSubtype := slices.ContainsFunc([]string{ "atom", "rss", "xml" }, func(accepted string) bool {
+				return strings.Contains(mimeSubtype, accepted)
+			})
+			if  hasValidType && hasValidSubtype {
 				snapshots = append(snapshots, Snapshot{
 					Url: feedUrl,
 					Date: date,
