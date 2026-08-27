@@ -62,18 +62,10 @@ func pollUrl(client *http.Client, url string) (response *http.Response, changed 
 	changed = response.StatusCode != http.StatusNotModified
 
 	// NOTE(simon): Get Etag header
-	if httpEtag := response.Header["Etag"]; len(httpEtag) > 0 {
-		// NOTE(simon): There might be multiple items due to the interface, but
-		// the HTTP spec only allows one, so we use the first one.
-		meta.Etag = httpEtag[0]
-	}
+	meta.Etag = response.Header.Get("Etag")
 
 	// NOTE(simon): Get Last-Modifed header
-	if httpLastModified := response.Header["Last-Modified"]; len(httpLastModified) > 0 {
-		// NOTE(simon): There might be multiple items due to the interface, but
-		// the HTTP spec only allows one, so we use the first one.
-		httpLastModified := httpLastModified[0]
-
+	if httpLastModified := response.Header.Get("Last-Modified"); len(httpLastModified) > 0 {
 		formats := []string{
 			time.RFC1123,                   // From HTTP spec
 			"Mon, 2 Jan 2006 15:04:05 MST", // Some don't zero-pad the days

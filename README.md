@@ -5,7 +5,6 @@ from the feeds, but maybe we will have a way of reading articles here as well.
 
 ## TODO
 
-* Trim whitespace from entry titles
 * Save the date something got imported into the database
 * Fetch tags/categories that you can filter by
 * Dynamic update frequency per feed based on when we get new items
