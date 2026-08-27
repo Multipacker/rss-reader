@@ -14,6 +14,8 @@ import (
 
 	"Multipacker/rss-reader/internal/feedparse"
 	"Multipacker/rss-reader/internal/wayback"
+
+	"github.com/klauspost/compress/gzhttp"
 )
 
 
@@ -25,7 +27,7 @@ type HttpMeta struct {
 
 var httpMetaCache sync.Map
 
-func pollUrl(url string) (response *http.Response, changed bool, err error) {
+func pollUrl(client *http.Client, url string) (response *http.Response, changed bool, err error) {
 	// NOTE(simon): Create the request.
 	request, err := http.NewRequest("GET", url, nil)
 	if err != nil {
@@ -51,7 +53,7 @@ func pollUrl(url string) (response *http.Response, changed bool, err error) {
 	request.Header.Add("Accept", "application/atom+xml")
 	request.Header.Add("Accept", "application/xml")
 
-	response, err = (&http.Client{}).Do(request)
+	response, err = client.Do(request)
 	if err != nil {
 		return
 	}
@@ -99,8 +101,8 @@ func pollUrl(url string) (response *http.Response, changed bool, err error) {
 
 
 
-func updateFeed(url string, storage *Storage) error {
-	response, changed, err := pollUrl(url)
+func updateFeed(client *http.Client, url string, storage *Storage) error {
+	response, changed, err := pollUrl(client, url)
 	if err != nil {
 		return fmt.Errorf("poll url: %w", err)
 	}
@@ -126,7 +128,7 @@ func updateFeed(url string, storage *Storage) error {
 	return nil
 }
 
-func updateFeeds(storage *Storage) {
+func updateFeeds(client *http.Client, storage *Storage) {
 	log.Println("INFO: Updating feeds")
 	beforeUpdate := time.Now()
 
@@ -138,7 +140,7 @@ func updateFeeds(storage *Storage) {
 		wg.Add(1)
 		go func(link string) {
 			defer wg.Done()
-			err := updateFeed(link, storage)
+			err := updateFeed(client, link, storage)
 			if err != nil {
 				log.Println(err)
 			}
@@ -150,7 +152,7 @@ func updateFeeds(storage *Storage) {
 	log.Printf("INFO: Feed updated finished: %s\n", time.Since(beforeUpdate))
 }
 
-func fetchWaybackEntry(storage *Storage) {
+func fetchWaybackEntry(client *http.Client, storage *Storage) {
 	// NOTE(simon): Pop the latest snapshot.
 	var snapshot wayback.Snapshot
 	storage.snapshotLock.Lock()
@@ -168,7 +170,7 @@ func fetchWaybackEntry(storage *Storage) {
 
 	log.Printf("Fetching snapshot %v@%v\n", snapshot.Url, snapshot.Date)
 
-	response, err := wayback.FetchSnapshot(snapshot.Url, snapshot.Date)
+	response, err := wayback.FetchSnapshot(client, snapshot.Url, snapshot.Date)
 
 	// NOTE(simon): We failed to fetch the entry, requeue it for later processing.
 	if err != nil {
@@ -205,16 +207,16 @@ func fetchWaybackEntry(storage *Storage) {
 	}
 }
 
-func update(storage *Storage) {
+func update(client *http.Client, storage *Storage) {
 	updateFeedsTick       := time.Tick(24 * time.Hour)
 	fetchWaybackEntryTick := time.Tick(30 * time.Second)
 
 	for {
 		select {
 		case <- updateFeedsTick:
-			updateFeeds(storage)
+			updateFeeds(client, storage)
 		case <- fetchWaybackEntryTick:
-			fetchWaybackEntry(storage)
+			fetchWaybackEntry(client, storage)
 		}
 	}
 }
@@ -267,11 +269,15 @@ func main() {
 		log.Fatal(fmt.Errorf("create storage: %w", err))
 	}
 
-	if false {
+	client := http.Client{
+		Transport: gzhttp.Transport(http.DefaultTransport),
+	}
+
+	if true {
 	// NOTE(simon): Fetch initial feeds
 	log.Println("Fetching feeds from config")
 	for _, link := range config.Urls {
-		go updateFeed(link, storage)
+		go updateFeed(&client, link, storage)
 	}
 
 	go func () {
@@ -280,7 +286,7 @@ func main() {
 			lastPollTime := storage.getLatestSnapshotTime(link)
 
 			log.Printf("Fetching snapshots for %v\n", link)
-			snapshots, err := wayback.QuerySnapshots(link, lastPollTime)
+			snapshots, err := wayback.QuerySnapshots(&client, link, lastPollTime)
 			if err != nil {
 				log.Printf("ERROR %v: Failed to fetch snapshots %v\n", link, err)
 				continue
@@ -298,7 +304,7 @@ func main() {
 	}()
 
 	// NOTE(simon): Start feed update process.
-	go update(storage)
+	go update(&client, storage)
 	}
 
 	runFrontend(*reload, config, storage)

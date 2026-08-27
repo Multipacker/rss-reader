@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 )
@@ -18,7 +19,7 @@ const (
 	TimeFormat string = "20060102030405"
 )
 
-func FetchSnapshot(url, date string) (*http.Response, error) {
+func FetchSnapshot(client *http.Client, url, date string) (*http.Response, error) {
 	// TODO(simon): Honor 429 Too Many Requests and Retry-After
 
 	request, err := http.NewRequest("GET", "https://web.archive.org/web/" + date + "id_/" + url, nil)
@@ -28,11 +29,11 @@ func FetchSnapshot(url, date string) (*http.Response, error) {
 
 	request.Header.Set("User-Agent", "SilverFeed/1.0")
 
-	response, err := http.DefaultClient.Do(request)
+	response, err := client.Do(request)
 	return response, err
 }
 
-func QuerySnapshots(feedUrl string, lastPollTime time.Time) ([]Snapshot, error) {
+func QuerySnapshots(client *http.Client, feedUrl string, lastPollTime time.Time) ([]Snapshot, error) {
 	// NOTE(simon): Always valid so skip the error.
 	requestUrl, _ := url.Parse("http://web.archive.org/cdx/search/cdx")
 
@@ -61,7 +62,7 @@ func QuerySnapshots(feedUrl string, lastPollTime time.Time) ([]Snapshot, error) 
 		request.Header.Set("User-Agent", "SilverFeed/1.0")
 
 		// NOTE(simon): Issue request with query.
-		response, err := http.DefaultClient.Do(request)
+		response, err := client.Do(request)
 		if err != nil {
 			return nil, fmt.Errorf("http do: %v", err)
 		}
