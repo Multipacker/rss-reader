@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"embed"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log"
@@ -423,24 +424,30 @@ func (storage *Storage) addSnapshots(url string, timestamp time.Time, snapshots 
 	return nil
 }
 
-func (storage *Storage) getLatestSnapshotTime(link string) time.Time {
-	timestamp := time.Time{}
-	err := storage.db.QueryRow(context.Background(), "SELECT updated FROM SnapshotTimes WHERE url = $1", link).Scan(&timestamp)
-	if err != nil {
-		log.Printf("failed to query latest snapshot time: %w\n", err)
-		return time.Time{}
+func (storage *Storage) getLatestSnapshotTime(url string) (time.Time, error) {
+	var timestamp time.Time
+	err := storage.db.QueryRow(context.Background(), "SELECT updated FROM SnapshotTimes WHERE url = $1", url).Scan(&timestamp)
+
+	// NOTE(simon): No rows, return zero time.
+	if errors.Is(err, pgx.ErrNoRows) {
+		return time.Time{}, nil
 	}
 
-	return timestamp
+	if err != nil {
+		return time.Time{}, fmt.Errorf("failed to query latest snapshot time: %w\n", err)
+	}
+
+	return timestamp, nil
 }
 
-func (storage *Storage) getLatestSnapshot() (string, time.Time) {
-	query := "SELECT url, timestamp FROM UnfetchedSnapshots ORDER BY timestamp DESC LIMIT 1"
+func (storage *Storage) getLatestSnapshot() (string, time.Time, error) {
 	var url string
 	var timestamp time.Time
-	err := storage.db.QueryRow(context.Background(), query).Scan(&url, &timestamp)
+	err := storage.db.QueryRow(context.Background(), "SELECT url, timestamp FROM UnfetchedSnapshots ORDER BY timestamp DESC LIMIT 1").Scan(&url, &timestamp)
+
 	if err != nil {
-		log.Printf("failed to query latest snapshot: %w\n", err)
+		return "", time.Time{}, fmt.Errorf("failed to query latest snapshot: %w\n", err)
 	}
-	return url, timestamp
+
+	return url, timestamp, nil
 }

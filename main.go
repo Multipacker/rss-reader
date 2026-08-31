@@ -141,11 +141,11 @@ func updateFeeds(client *http.Client, storage *Storage) {
 }
 
 func fetchWaybackEntry(client *http.Client, storage *Storage) error {
-	url, snapshot := storage.getLatestSnapshot()
+	url, snapshot, err := storage.getLatestSnapshot()
 
 	// NOTE(simon): No snapshots left? Quit
-	if snapshot.IsZero() {
-		return nil
+	if err != nil{
+		return fmt.Errorf("failed to get latest snapshot: %w\n", err)
 	}
 
 	log.Printf("Fetching snapshot %v@%v\n", url, snapshot)
@@ -235,12 +235,12 @@ func main() {
 
 	config, err := readConfig()
 	if err != nil {
-		log.Fatal(fmt.Errorf("read config: %w", err))
+		log.Fatal(fmt.Errorf("failed to read config: %w", err))
 	}
 
 	storage, err := createStorage()
 	if err != nil {
-		log.Fatal(fmt.Errorf("create storage: %w", err))
+		log.Fatal(fmt.Errorf("failed to create storage: %w", err))
 	}
 
 	client := http.Client{
@@ -257,7 +257,11 @@ func main() {
 	go func () {
 		for _, feed := range config.Feeds {
 			timeBeforePoll := time.Now()
-			lastPollTime := storage.getLatestSnapshotTime(feed.Url)
+			lastPollTime, err := storage.getLatestSnapshotTime(feed.Url)
+			if err != nil {
+				log.Println("failed to get latest snapshot %v: %w", feed.Url, err)
+				continue
+			}
 
 			log.Printf("Fetching snapshots for %v\n", feed.Url)
 			snapshots, err := wayback.QuerySnapshots(&client, feed.Url, lastPollTime)
