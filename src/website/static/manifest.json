@@ -1,0 +1,10 @@
+{
+    "name": "AggRss",
+    "icons": [
+        "src": "favicon.svg",
+        "type": "image/svg+xml",
+        "sizes": "any"
+    ],
+    "start_url": "/",
+    "display": "standalone"
+}

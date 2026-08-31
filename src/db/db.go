@@ -60,7 +60,7 @@ func QueryLax[T any](context context.Context, db Database, sql string, args ...a
 	return values, err
 }
 
-func QueryOneLax[T any](context context.Context, db Database, sql string, args ...any) ([]T, error) {
+func QueryOneLax[T any](context context.Context, db Database, sql string, args ...any) (T, error) {
 	values, err := QueryLax[T](context, db, sql, args...)
 	if err != nil {
 		var zero T
