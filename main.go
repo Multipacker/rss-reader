@@ -147,36 +147,36 @@ func updateFeeds(client *http.Client, storage *Storage) {
 }
 
 func fetchWaybackEntry(client *http.Client, storage *Storage) error {
-	url, snapshot, err := storage.getLatestSnapshot(context.Background())
+	snapshot, err := storage.getLatestSnapshot(context.Background())
 
 	// NOTE(simon): No snapshots left? Quit
 	if err != nil{
 		return fmt.Errorf("failed to get latest snapshot: %w\n", err)
 	}
 
-	log.Printf("Fetching snapshot %v@%v\n", url, snapshot)
+	log.Printf("Fetching snapshot %v@%v\n", snapshot.Url, snapshot.Timestamp)
 
-	response, err := wayback.FetchSnapshot(client, url, snapshot)
+	response, err := wayback.FetchSnapshot(client, snapshot.Url, snapshot.Timestamp)
 
 	// NOTE(simon): We failed to fetch the entry, requeue it for later processing.
 	if err != nil {
-		return fmt.Errorf("failed to fetch snapshot %v: %w", url, err)
+		return fmt.Errorf("failed to fetch snapshot %v: %w", snapshot.Url, err)
 	}
 	defer response.Body.Close()
 
 	// NOTE(simon): On a bad response we just skip this URL.
 	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("failed to fetch snapshot %v: %v", url, response.Status)
+		return fmt.Errorf("failed to fetch snapshot %v: %v", snapshot.Url, response.Status)
 	}
 
-	feed, entries, err := feedparse.Parse(response.Body, url)
+	feed, entries, err := feedparse.Parse(response.Body, snapshot.Url)
 
 	// NOTE(simon): Failing to parse historic entries cannot be recovered.
 	if err != nil {
-		return fmt.Errorf("failed to parse feed %v: %w", url, err)
+		return fmt.Errorf("failed to parse feed %v: %w", snapshot.Url, err)
 	}
 
-	storage.storeFeedSnapshot(context.Background(), snapshot, feed, entries)
+	storage.storeFeedSnapshot(context.Background(), snapshot.Timestamp, feed, entries)
 	return nil
 }
 

@@ -11,7 +11,9 @@ import (
 	"strings"
 	"time"
 
+	"Multipacker/rss-reader/internal/db"
 	"Multipacker/rss-reader/internal/feedparse"
+	"Multipacker/rss-reader/internal/models"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -29,6 +31,8 @@ const (
 type Storage struct {
 	db *pgxpool.Pool
 }
+
+
 
 func createStorage() (*Storage, error) {
 	storage := new(Storage)
@@ -247,15 +251,9 @@ func (storage *Storage) QueryFeeds(context context.Context, query string, offset
 }
 
 func (storage *Storage) Feeds(context context.Context) ([]feedparse.Feed, error) {
-	query := `SELECT (id, title, description, url as link, updated) FROM Feeds ORDER BY title`
-	rows, err := storage.db.Query(context, query)
+	feeds, err := db.Query[feedparse.Feed](context, storage.db, "SELECT (id, title, description, url as link, updated) FROM Feeds ORDER BY title")
 	if err != nil {
 		return nil, fmt.Errorf("failed to query feeds: %w", err)
-	}
-
-	feeds, err := pgx.CollectRows(rows, pgx.RowToStructByName[feedparse.Feed])
-	if err != nil {
-		return nil, fmt.Errorf("failed to collect feeds: %w", err)
 	}
 
 	return feeds, nil
@@ -282,20 +280,16 @@ func (storage *Storage) QueryEntries(context context.Context, query string, sort
 		SELECT
 			Entries.title     AS title,
 			Feeds.title       AS feed,
+			Entries.url       As link,
 			Entries.id        AS id,
 			Entries.published AS published
 		FROM
 			Entries JOIN Feeds ON feed = Feeds.id
 		ORDER BY published
 	`
-	rows, err := storage.db.Query(context, entryQuery)
+	descriptions, err := db.QueryLax[EntryDescription](context, storage.db, entryQuery)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query entries: %w", err)
-	}
-
-	descriptions, err := pgx.CollectRows(rows, pgx.RowToStructByNameLax[EntryDescription])
-	if err != nil {
-		return nil, fmt.Errorf("failed to collect entries: %w", err)
 	}
 
 	for i, description := range descriptions {
@@ -367,18 +361,15 @@ func (storage *Storage) QueryEntries(context context.Context, query string, sort
 }
 
 func (storage *Storage) Entries(context context.Context) ([]feedparse.Entry, error) {
-	rows, err := storage.db.Query(context, "SELECT id, feed, title, url AS link, updated, published FROM Entries")
+	entries, err := db.Query[feedparse.Entry](context, storage.db, "SELECT id, feed, title, url AS link, updated, published FROM Entries")
 	if err != nil {
 		return nil, fmt.Errorf("failed to query entries: %w", err)
 	}
 
-	entries, err := pgx.CollectRows(rows, pgx.RowToStructByName[feedparse.Entry])
-	if err != nil {
-		return nil, fmt.Errorf("failed to collect entries: %w", err)
-	}
-
 	return entries, nil
 }
+
+
 
 func (storage *Storage) addSnapshots(context context.Context, url string, timestamp time.Time, snapshots []time.Time) error {
 	transaction, err := storage.db.Begin(context)
@@ -424,8 +415,12 @@ func (storage *Storage) addSnapshots(context context.Context, url string, timest
 }
 
 func (storage *Storage) getLatestSnapshotTime(context context.Context, url string) (time.Time, error) {
-	var timestamp time.Time
-	err := storage.db.QueryRow(context, "SELECT updated FROM SnapshotTimes WHERE url = $1", url).Scan(&timestamp)
+	snapshot, err := db.QueryOne[models.SnapshotTime](
+		context,
+		storage.db,
+		"SELECT url, updated FROM SnapshotTimes WHERE url = $1",
+		url,
+	)
 
 	// NOTE(simon): No rows, return zero time.
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -436,17 +431,19 @@ func (storage *Storage) getLatestSnapshotTime(context context.Context, url strin
 		return time.Time{}, fmt.Errorf("failed to query latest snapshot time: %w\n", err)
 	}
 
-	return timestamp, nil
+	return snapshot.Updated, nil
 }
 
-func (storage *Storage) getLatestSnapshot(context context.Context) (string, time.Time, error) {
-	var url string
-	var timestamp time.Time
-	err := storage.db.QueryRow(context, "SELECT url, timestamp FROM UnfetchedSnapshots ORDER BY timestamp DESC LIMIT 1").Scan(&url, &timestamp)
+func (storage *Storage) getLatestSnapshot(context context.Context) (models.FeedSnapshot, error) {
+	snapshot, err := db.QueryOne[models.FeedSnapshot](
+		context,
+		storage.db,
+		"SELECT url, timestamp FROM UnfetchedSnapshots ORDER BY timestamp DESC LIMIT 1",
+	)
 
 	if err != nil {
-		return "", time.Time{}, fmt.Errorf("failed to query latest snapshot: %w\n", err)
+		return models.FeedSnapshot{}, fmt.Errorf("failed to query latest snapshot: %w\n", err)
 	}
 
-	return url, timestamp, nil
+	return snapshot, nil
 }
