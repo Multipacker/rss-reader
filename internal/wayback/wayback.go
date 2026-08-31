@@ -16,7 +16,7 @@ type Snapshot struct {
 }
 
 const (
-	TimeFormat string = "20060102030405"
+	TimeFormat string = "20060102150405"
 )
 
 func FetchSnapshot(client *http.Client, url, date string) (*http.Response, error) {
