@@ -23,7 +23,7 @@ CREATE TABLE SnapshotTimes (
 );
 
 CREATE TABLE UnfetchedSnapshots (
-    url       TEXT NOT NULL REFERENCES SnapshotTimes(url),
-    timestamp TEXT NOT NULL,
+    url       TEXT      NOT NULL REFERENCES SnapshotTimes(url),
+    timestamp TIMESTAMP NOT NULL,
     PRIMARY KEY (url, timestamp)
 );

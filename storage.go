@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"Multipacker/rss-reader/internal/feedparse"
-	"Multipacker/rss-reader/internal/wayback"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -31,7 +30,7 @@ type Storage struct {
 	db *pgxpool.Pool
 }
 
-func createStorage(path string) (*Storage, error) {
+func createStorage() (*Storage, error) {
 	storage := new(Storage)
 
 	// NOTE(simon): Open database connection
@@ -55,23 +54,23 @@ func createStorage(path string) (*Storage, error) {
 }
 
 func (storage *Storage) storeFeed(feed feedparse.Feed, entries []feedparse.Entry) {
-	storage.storeFeedSnapshot(wayback.Snapshot{}, feed, entries)
+	storage.storeFeedSnapshot(time.Time{}, feed, entries)
 }
 
-func (storage *Storage) storeFeedSnapshot(snapshot wayback.Snapshot, feed feedparse.Feed, entries []feedparse.Entry) {
+func (storage *Storage) storeFeedSnapshot(snapshotTime time.Time, feed feedparse.Feed, entries []feedparse.Entry) {
 	transaction, err := storage.db.Begin(context.Background())
 	if err != nil {
-		log.Println(err)
+		log.Printf("failed to start transaction: %w\n", err)
 	}
 	defer transaction.Rollback(context.Background())
 
 	batch := pgx.Batch{}
-	if snapshot.Date != "" {
+	if !snapshotTime.IsZero() {
 		batch.Queue(
 			"DELETE FROM UnfetchedSnapshots WHERE url = @url AND timestamp = @timestamp",
 			pgx.NamedArgs{
-				"url":       snapshot.Url,
-				"timestamp": snapshot.Date,
+				"url":       feed.Link,
+				"timestamp": snapshotTime,
 			},
 		)
 	}
@@ -105,9 +104,12 @@ func (storage *Storage) storeFeedSnapshot(snapshot wayback.Snapshot, feed feedpa
 
 	err = transaction.SendBatch(context.Background(), &batch).Close()
 	if err != nil {
-		log.Println(err)
+		log.Printf("failed to send batch: %v\n", err)
 	}
-	transaction.Commit(context.Background())
+	err = transaction.Commit(context.Background())
+	if err != nil {
+		log.Printf("failed to commit transaction: %v\n", err)
+	}
 }
 
 
@@ -240,13 +242,13 @@ func (storage *Storage) Feeds() []feedparse.Feed {
 	query := `SELECT (id, title, description, url as link, updated) FROM Feeds ORDER BY title`
 	rows, err := storage.db.Query(context.Background(), query)
 	if err != nil {
-		log.Println(err)
+		log.Printf("failed to query feeds: %w\n", err)
 		return nil
 	}
 
 	feeds, err := pgx.CollectRows(rows, pgx.RowToStructByName[feedparse.Feed])
 	if err != nil {
-		log.Println(err)
+		log.Printf("failed to collect feeds: %w\n", err)
 		return nil
 	}
 
@@ -282,13 +284,13 @@ func (storage *Storage) QueryEntries(query string, sortOrder SortOrder, offset i
 	`
 	rows, err := storage.db.Query(context.Background(), entryQuery)
 	if err != nil {
-		log.Println(err)
+		log.Printf("failed to query entries: %w\n", err)
 		return nil
 	}
 
 	descriptions, err := pgx.CollectRows(rows, pgx.RowToStructByNameLax[EntryDescription])
 	if err != nil {
-		log.Println(err)
+		log.Printf("failed to collect entries: %w\n", err)
 		return nil
 	}
 
@@ -363,13 +365,13 @@ func (storage *Storage) QueryEntries(query string, sortOrder SortOrder, offset i
 func (storage *Storage) Entries() []feedparse.Entry {
 	rows, err := storage.db.Query(context.Background(), "SELECT id, feed, title, url AS link, updated, published FROM Entries")
 	if err != nil {
-		log.Println(err)
+		log.Printf("failed to query entries: %w\n", err)
 		return nil
 	}
 
 	entries, err := pgx.CollectRows(rows, pgx.RowToStructByName[feedparse.Entry])
 	if err != nil {
-		log.Println(err)
+		log.Printf("failed to collect entries: %w\n", err)
 		return nil
 	}
 
@@ -378,10 +380,10 @@ func (storage *Storage) Entries() []feedparse.Entry {
 
 
 
-func (storage *Storage) addSnapshots(url string, timestamp time.Time, snapshots []wayback.Snapshot) error {
+func (storage *Storage) addSnapshots(url string, timestamp time.Time, snapshots []time.Time) error {
 	transaction, err := storage.db.Begin(context.Background())
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to start transaction: %w", err)
 	}
 	defer transaction.Rollback(context.Background())
 
@@ -394,7 +396,7 @@ func (storage *Storage) addSnapshots(url string, timestamp time.Time, snapshots 
 		},
 	)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to update snapshot time: %w", err)
 	}
 
 	batch := pgx.Batch{}
@@ -402,50 +404,43 @@ func (storage *Storage) addSnapshots(url string, timestamp time.Time, snapshots 
 		batch.Queue(
 			"INSERT INTO UnfetchedSnapshots VALUES (@url, @timestamp) ON CONFLICT DO NOTHING",
 			pgx.NamedArgs{
-				"url":       snapshot.Url,
-				"timestamp": snapshot.Date,
+				"url":       url,
+				"timestamp": snapshot,
 			},
 		)
 	}
 
 	err = transaction.SendBatch(context.Background(), &batch).Close()
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to send batch: %w", err)
 	}
 
 	err = transaction.Commit(context.Background())
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	return nil
 }
 
 func (storage *Storage) getLatestSnapshotTime(link string) time.Time {
 	timestamp := time.Time{}
 	err := storage.db.QueryRow(context.Background(), "SELECT updated FROM SnapshotTimes WHERE url = $1", link).Scan(&timestamp)
 	if err != nil {
+		log.Printf("failed to query latest snapshot time: %w\n", err)
 		return time.Time{}
 	}
 
 	return timestamp
 }
 
-func (storage *Storage) getLatestSnapshot() wayback.Snapshot {
-	query := "SELECT * FROM UnfetchedSnapshots ORDER BY timestamp DESC LIMIT 1"
-	snapshot := wayback.Snapshot{}
-	err := storage.db.QueryRow(context.Background(), query).Scan(&snapshot.Url, &snapshot.Date)
+func (storage *Storage) getLatestSnapshot() (string, time.Time) {
+	query := "SELECT url, timestamp FROM UnfetchedSnapshots ORDER BY timestamp DESC LIMIT 1"
+	var url string
+	var timestamp time.Time
+	err := storage.db.QueryRow(context.Background(), query).Scan(&url, &timestamp)
 	if err != nil {
-		log.Println(err)
+		log.Printf("failed to query latest snapshot: %w\n", err)
 	}
-	return snapshot
-}
-
-func (storage *Storage) pushSnapshot(snapshot wayback.Snapshot) error {
-	_, err := storage.db.Exec(
-		context.Background(),
-		"INSERT INTO UnfetchedSnapshots VALUES (@url, @timestamp)",
-		pgx.NamedArgs{
-			"url":       snapshot.Url,
-			"timestamp": snapshot.Date,
-		},
-	)
-
-	return err
+	return url, timestamp
 }

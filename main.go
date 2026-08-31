@@ -140,40 +140,38 @@ func updateFeeds(client *http.Client, storage *Storage) {
 	log.Printf("INFO: Feed updated finished: %s\n", time.Since(beforeUpdate))
 }
 
-func fetchWaybackEntry(client *http.Client, storage *Storage) {
-	snapshot := storage.getLatestSnapshot()
+func fetchWaybackEntry(client *http.Client, storage *Storage) error {
+	url, snapshot := storage.getLatestSnapshot()
 
 	// NOTE(simon): No snapshots left? Quit
-	if snapshot.Date == "" {
-		return
+	if snapshot.IsZero() {
+		return nil
 	}
 
-	log.Printf("Fetching snapshot %v@%v\n", snapshot.Url, snapshot.Date)
+	log.Printf("Fetching snapshot %v@%v\n", url, snapshot)
 
-	response, err := wayback.FetchSnapshot(client, snapshot.Url, snapshot.Date)
+	response, err := wayback.FetchSnapshot(client, url, snapshot)
 
 	// NOTE(simon): We failed to fetch the entry, requeue it for later processing.
 	if err != nil {
-		log.Printf("ERROR %v (%v): %v\n", snapshot.Url, snapshot.Date, err)
-		return
+		return fmt.Errorf("failed to fetch snapshot %v: %w", url, err)
 	}
 	defer response.Body.Close()
 
 	// NOTE(simon): On a bad response we just skip this URL.
 	if response.StatusCode != http.StatusOK {
-		log.Printf("GET %v", response.Status)
-		return
+		return fmt.Errorf("failed to fetch snapshot %v: %v", url, response.Status)
 	}
 
-	feed, entries, err := feedparse.Parse(response.Body, snapshot.Url)
+	feed, entries, err := feedparse.Parse(response.Body, url)
 
 	// NOTE(simon): Failing to parse historic entries cannot be recovered.
 	if err != nil {
-		log.Printf("ERROR %v@%v: %v\n", snapshot.Url, snapshot.Date, err)
-		return
+		return fmt.Errorf("failed to parse feed %v: %w", url, err)
 	}
 
 	storage.storeFeedSnapshot(snapshot, feed, entries)
+	return nil
 }
 
 func update(client *http.Client, storage *Storage) {
@@ -185,18 +183,25 @@ func update(client *http.Client, storage *Storage) {
 		case <- updateFeedsTick:
 			updateFeeds(client, storage)
 		case <- fetchWaybackEntryTick:
-			fetchWaybackEntry(client, storage)
+			err := fetchWaybackEntry(client, storage)
+			if err != nil {
+				log.Println(err)
+			}
 		}
 	}
 }
 
 
 
+type UserFeed struct {
+	Url        string
+	DaysToKeep int
+}
+
 type Config struct {
-	Host            string
-	Port            int
-	Urls            []string
-	OutputDirectory string
+	Host  string
+	Port  int
+	Feeds []UserFeed
 }
 
 func readConfig() (Config, error) {
@@ -233,7 +238,7 @@ func main() {
 		log.Fatal(fmt.Errorf("read config: %w", err))
 	}
 
-	storage, err := createStorage(config.OutputDirectory)
+	storage, err := createStorage()
 	if err != nil {
 		log.Fatal(fmt.Errorf("create storage: %w", err))
 	}
@@ -245,26 +250,26 @@ func main() {
 	if true {
 	// NOTE(simon): Fetch initial feeds
 	log.Println("Fetching feeds from config")
-	for _, link := range config.Urls {
-		go updateFeed(&client, link, storage)
+	for _, feed := range config.Feeds {
+		go updateFeed(&client, feed.Url, storage)
 	}
 
 	go func () {
-		for _, link := range config.Urls {
+		for _, feed := range config.Feeds {
 			timeBeforePoll := time.Now()
-			lastPollTime := storage.getLatestSnapshotTime(link)
+			lastPollTime := storage.getLatestSnapshotTime(feed.Url)
 
-			log.Printf("Fetching snapshots for %v\n", link)
-			snapshots, err := wayback.QuerySnapshots(&client, link, lastPollTime)
+			log.Printf("Fetching snapshots for %v\n", feed.Url)
+			snapshots, err := wayback.QuerySnapshots(&client, feed.Url, lastPollTime)
 			if err != nil {
-				log.Printf("ERROR %v: Failed to fetch snapshots %v\n", link, err)
+				log.Printf("failed to fetch snapshots %v: %v\n", feed.Url, err)
 				continue
 			}
-			log.Printf("Got %v new snapthots for %v\n", len(snapshots), link)
+			log.Printf("Got %v new snapthots for %v\n", len(snapshots), feed.Url)
 
-			err = storage.addSnapshots(link, timeBeforePoll, snapshots)
+			err = storage.addSnapshots(feed.Url, timeBeforePoll, snapshots)
 			if err != nil {
-				log.Printf("ERROR %v: %v\n", link, fmt.Errorf("storage addSnapshots: %w", err))
+				log.Printf("failed to add snapshots %v: %v\n", feed.Url, err)
 			}
 		}
 	}()

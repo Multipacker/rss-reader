@@ -10,19 +10,14 @@ import (
 	"time"
 )
 
-type Snapshot struct {
-	Url  string
-	Date string
-}
-
 const (
 	TimeFormat string = "20060102150405"
 )
 
-func FetchSnapshot(client *http.Client, url, date string) (*http.Response, error) {
+func FetchSnapshot(client *http.Client, url string, date time.Time) (*http.Response, error) {
 	// TODO(simon): Honor 429 Too Many Requests and Retry-After
 
-	request, err := http.NewRequest("GET", "https://web.archive.org/web/" + date + "id_/" + url, nil)
+	request, err := http.NewRequest("GET", "https://web.archive.org/web/" + date.Format(TimeFormat) + "id_/" + url, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -33,7 +28,7 @@ func FetchSnapshot(client *http.Client, url, date string) (*http.Response, error
 	return response, err
 }
 
-func QuerySnapshots(client *http.Client, feedUrl string, lastPollTime time.Time) ([]Snapshot, error) {
+func QuerySnapshots(client *http.Client, feedUrl string, lastPollTime time.Time) ([]time.Time, error) {
 	// NOTE(simon): Always valid so skip the error.
 	requestUrl, _ := url.Parse("http://web.archive.org/cdx/search/cdx")
 
@@ -54,7 +49,7 @@ func QuerySnapshots(client *http.Client, feedUrl string, lastPollTime time.Time)
 	exponentialBackoffBase  := 1 * time.Minute
 	exponentialBackoffTries := 0
 
-	var snapshots []Snapshot
+	var snapshots []time.Time
 	for {
 		// NOTE(simon): Setup request with custom headers.
 		requestUrl.RawQuery = query.Encode()
@@ -141,8 +136,12 @@ func QuerySnapshots(client *http.Client, feedUrl string, lastPollTime time.Time)
 				continue
 			}
 
-			date     := line[0]
-			mimetype := line[1]
+			timestamp, err := time.Parse(TimeFormat, line[0])
+			mimetype       := line[1]
+
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse snapshot time: %w", err)
+			}
 
 			// NOTE(simon): Do we have a valid mimetype?
 			mimeType, mimeSubtype, _ := strings.Cut(mimetype, "/")
@@ -152,11 +151,8 @@ func QuerySnapshots(client *http.Client, feedUrl string, lastPollTime time.Time)
 			hasValidSubtype := slices.ContainsFunc([]string{ "atom", "rss", "xml" }, func(accepted string) bool {
 				return strings.Contains(mimeSubtype, accepted)
 			})
-			if  hasValidType && hasValidSubtype {
-				snapshots = append(snapshots, Snapshot{
-					Url: feedUrl,
-					Date: date,
-				})
+			if hasValidType && hasValidSubtype {
+				snapshots = append(snapshots, timestamp)
 			}
 		}
 
