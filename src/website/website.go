@@ -288,5 +288,11 @@ func Execute() {
 	go update(&client, storage)
 	}
 
-	runFrontend(*reload, config, storage)
+	handler := NewWebsiteRoutes(*reload, config, storage)
+
+	address := fmt.Sprintf("%s:%d", config.Host, config.Port)
+	log.Printf("INFO: Serving on http://%s", address)
+	if err := http.ListenAndServe(address, handler); err != nil {
+		log.Fatal(err)
+	}
 }
