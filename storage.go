@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"log"
 	"os"
 	"slices"
 	"strings"
@@ -48,20 +47,20 @@ func createStorage() (*Storage, error) {
 
 	_, err = storage.db.Exec(context.Background(), string(init))
 	if err != nil {
-		log.Printf("ERROR %v\n", fmt.Errorf("storage db exec: %w", err))
+		return nil, fmt.Errorf("storage db exec: %w", err)
 	}
 
 	return storage, nil
 }
 
-func (storage *Storage) storeFeed(context context.Context, feed feedparse.Feed, entries []feedparse.Entry) {
-	storage.storeFeedSnapshot(context, time.Time{}, feed, entries)
+func (storage *Storage) storeFeed(context context.Context, feed feedparse.Feed, entries []feedparse.Entry) error {
+	return storage.storeFeedSnapshot(context, time.Time{}, feed, entries)
 }
 
-func (storage *Storage) storeFeedSnapshot(context context.Context, snapshotTime time.Time, feed feedparse.Feed, entries []feedparse.Entry) {
+func (storage *Storage) storeFeedSnapshot(context context.Context, snapshotTime time.Time, feed feedparse.Feed, entries []feedparse.Entry) error {
 	transaction, err := storage.db.Begin(context)
 	if err != nil {
-		log.Printf("failed to start transaction: %w\n", err)
+		return fmt.Errorf("failed to start transaction: %w", err)
 	}
 	defer transaction.Rollback(context)
 
@@ -105,12 +104,15 @@ func (storage *Storage) storeFeedSnapshot(context context.Context, snapshotTime 
 
 	err = transaction.SendBatch(context, &batch).Close()
 	if err != nil {
-		log.Printf("failed to send batch: %v\n", err)
+		return fmt.Errorf("failed to send batch: %v", err)
 	}
+
 	err = transaction.Commit(context)
 	if err != nil {
-		log.Printf("failed to commit transaction: %v\n", err)
+		return fmt.Errorf("failed to commit transaction: %v", err)
 	}
+
+	return nil
 }
 
 
@@ -181,12 +183,17 @@ type FeedDescription struct {
 	HighlightTitle HighlightString
 }
 
-func (storage *Storage) QueryFeeds(context context.Context, query string, offset int, size int) []FeedDescription {
+func (storage *Storage) QueryFeeds(context context.Context, query string, offset int, size int) ([]FeedDescription, error) {
 	queryWords := strings.Fields(strings.ToLower(query))
+
+	feeds, err := storage.Feeds(context)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch feeds: %w", err)
+	}
 
 	// NOTE(simon): Collect feeds to descriptions.
 	descriptions := []FeedDescription{}
-	for _, feed := range storage.Feeds(context) {
+	for _, feed := range feeds {
 		description := FeedDescription{
 			Title: feed.Title,
 			Description: feed.Description,
@@ -236,24 +243,22 @@ func (storage *Storage) QueryFeeds(context context.Context, query string, offset
 	// NOTE(simon): Limit to query range.
 	descriptions = descriptions[offset:min(offset + size, len(descriptions))]
 
-	return descriptions
+	return descriptions, nil
 }
 
-func (storage *Storage) Feeds(context context.Context) []feedparse.Feed {
+func (storage *Storage) Feeds(context context.Context) ([]feedparse.Feed, error) {
 	query := `SELECT (id, title, description, url as link, updated) FROM Feeds ORDER BY title`
 	rows, err := storage.db.Query(context, query)
 	if err != nil {
-		log.Printf("failed to query feeds: %w\n", err)
-		return nil
+		return nil, fmt.Errorf("failed to query feeds: %w", err)
 	}
 
 	feeds, err := pgx.CollectRows(rows, pgx.RowToStructByName[feedparse.Feed])
 	if err != nil {
-		log.Printf("failed to collect feeds: %w\n", err)
-		return nil
+		return nil, fmt.Errorf("failed to collect feeds: %w", err)
 	}
 
-	return feeds
+	return feeds, nil
 }
 
 
@@ -269,7 +274,7 @@ type EntryDescription struct {
 	HighlightFeed  HighlightString
 }
 
-func (storage *Storage) QueryEntries(context context.Context, query string, sortOrder SortOrder, offset int, size int) []EntryDescription {
+func (storage *Storage) QueryEntries(context context.Context, query string, sortOrder SortOrder, offset int, size int) ([]EntryDescription, error) {
 	queryWords := strings.Fields(strings.ToLower(query))
 
 	// NOTE(simon): Collect entries to descriptions.
@@ -285,14 +290,12 @@ func (storage *Storage) QueryEntries(context context.Context, query string, sort
 	`
 	rows, err := storage.db.Query(context, entryQuery)
 	if err != nil {
-		log.Printf("failed to query entries: %w\n", err)
-		return nil
+		return nil, fmt.Errorf("failed to query entries: %w", err)
 	}
 
 	descriptions, err := pgx.CollectRows(rows, pgx.RowToStructByNameLax[EntryDescription])
 	if err != nil {
-		log.Printf("failed to collect entries: %w\n", err)
-		return nil
+		return nil, fmt.Errorf("failed to collect entries: %w", err)
 	}
 
 	for i, description := range descriptions {
@@ -360,23 +363,21 @@ func (storage *Storage) QueryEntries(context context.Context, query string, sort
 	// NOTE(simon): Limit to query range.
 	descriptions = descriptions[offset:min(offset + size, len(descriptions))]
 
-	return descriptions
+	return descriptions, nil
 }
 
-func (storage *Storage) Entries(context context.Context) []feedparse.Entry {
+func (storage *Storage) Entries(context context.Context) ([]feedparse.Entry, error) {
 	rows, err := storage.db.Query(context, "SELECT id, feed, title, url AS link, updated, published FROM Entries")
 	if err != nil {
-		log.Printf("failed to query entries: %w\n", err)
-		return nil
+		return nil, fmt.Errorf("failed to query entries: %w", err)
 	}
 
 	entries, err := pgx.CollectRows(rows, pgx.RowToStructByName[feedparse.Entry])
 	if err != nil {
-		log.Printf("failed to collect entries: %w\n", err)
-		return nil
+		return nil, fmt.Errorf("failed to collect entries: %w", err)
 	}
 
-	return entries
+	return entries, nil
 }
 
 func (storage *Storage) addSnapshots(context context.Context, url string, timestamp time.Time, snapshots []time.Time) error {

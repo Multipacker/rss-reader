@@ -123,9 +123,14 @@ func updateFeeds(client *http.Client, storage *Storage) {
 	log.Println("INFO: Updating feeds")
 	beforeUpdate := time.Now()
 
+	feeds, err := storage.Feeds(context.Background())
+	if err != nil {
+		log.Println(err)
+	}
+
 	// NOTE(simon): Dispatch updates to all feeds.
 	var wg sync.WaitGroup
-	for _, feed := range storage.Feeds(context.Background()) {
+	for _, feed := range feeds {
 		wg.Add(1)
 		go func(link string) {
 			defer wg.Done()

@@ -76,7 +76,11 @@ func handleFeedsPost(templateExecutor TemplateExecutor, storage *Storage) http.H
 		pageSize := 10
 		offset := page * pageSize
 
-		feeds := storage.QueryFeeds(request.Context(), query, offset, pageSize)
+		feeds, err := storage.QueryFeeds(request.Context(), query, offset, pageSize)
+		if err != nil {
+			// TODO(simon): Render error page
+			log.Println(err)
+		}
 
 		feedInfo := FeedInfo{
 			Query:    query,
@@ -85,7 +89,7 @@ func handleFeedsPost(templateExecutor TemplateExecutor, storage *Storage) http.H
 			HasMore:  pageSize == len(feeds),
 		}
 
-		err := templateExecutor.ExecuteTemplate(response, "feed_items.gohtml", feedInfo)
+		err = templateExecutor.ExecuteTemplate(response, "feed_items.gohtml", feedInfo)
 		if err != nil {
 			log.Println(fmt.Errorf("execute template: %w", err))
 		}
@@ -130,7 +134,11 @@ func handleEntriesPost(templateExecutor TemplateExecutor, storage *Storage) http
 		pageSize := 10
 		offset := page * pageSize
 
-		entries := storage.QueryEntries(request.Context(), query, sortOrder, offset, pageSize)
+		entries, err := storage.QueryEntries(request.Context(), query, sortOrder, offset, pageSize)
+		if err != nil {
+			// TODO(simon): Render error page
+			log.Println(err)
+		}
 
 		entryInfo := EntryInfo{
 			Query:    formQuery,
@@ -140,7 +148,7 @@ func handleEntriesPost(templateExecutor TemplateExecutor, storage *Storage) http
 			HasMore:  pageSize == len(entries),
 		}
 
-		err := templateExecutor.ExecuteTemplate(response, "entry_items.gohtml", entryInfo)
+		err = templateExecutor.ExecuteTemplate(response, "entry_items.gohtml", entryInfo)
 		if err != nil {
 			log.Println(fmt.Errorf("execute template: %w", err))
 		}
