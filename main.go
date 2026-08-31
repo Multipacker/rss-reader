@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -113,7 +114,7 @@ func updateFeed(client *http.Client, url string, storage *Storage) error {
 		return fmt.Errorf("feed parse: %w", err)
 	}
 
-	storage.storeFeed(feed, entries)
+	storage.storeFeed(context.Background(), feed, entries)
 
 	return nil
 }
@@ -124,7 +125,7 @@ func updateFeeds(client *http.Client, storage *Storage) {
 
 	// NOTE(simon): Dispatch updates to all feeds.
 	var wg sync.WaitGroup
-	for _, feed := range storage.Feeds() {
+	for _, feed := range storage.Feeds(context.Background()) {
 		wg.Add(1)
 		go func(link string) {
 			defer wg.Done()
@@ -141,7 +142,7 @@ func updateFeeds(client *http.Client, storage *Storage) {
 }
 
 func fetchWaybackEntry(client *http.Client, storage *Storage) error {
-	url, snapshot, err := storage.getLatestSnapshot()
+	url, snapshot, err := storage.getLatestSnapshot(context.Background())
 
 	// NOTE(simon): No snapshots left? Quit
 	if err != nil{
@@ -170,7 +171,7 @@ func fetchWaybackEntry(client *http.Client, storage *Storage) error {
 		return fmt.Errorf("failed to parse feed %v: %w", url, err)
 	}
 
-	storage.storeFeedSnapshot(snapshot, feed, entries)
+	storage.storeFeedSnapshot(context.Background(), snapshot, feed, entries)
 	return nil
 }
 
@@ -257,7 +258,7 @@ func main() {
 	go func () {
 		for _, feed := range config.Feeds {
 			timeBeforePoll := time.Now()
-			lastPollTime, err := storage.getLatestSnapshotTime(feed.Url)
+			lastPollTime, err := storage.getLatestSnapshotTime(context.Background(), feed.Url)
 			if err != nil {
 				log.Println("failed to get latest snapshot %v: %w", feed.Url, err)
 				continue
@@ -271,7 +272,7 @@ func main() {
 			}
 			log.Printf("Got %v new snapthots for %v\n", len(snapshots), feed.Url)
 
-			err = storage.addSnapshots(feed.Url, timeBeforePoll, snapshots)
+			err = storage.addSnapshots(context.Background(), feed.Url, timeBeforePoll, snapshots)
 			if err != nil {
 				log.Printf("failed to add snapshots %v: %v\n", feed.Url, err)
 			}

@@ -76,7 +76,7 @@ func handleFeedsPost(templateExecutor TemplateExecutor, storage *Storage) http.H
 		pageSize := 10
 		offset := page * pageSize
 
-		feeds := storage.QueryFeeds(query, offset, pageSize)
+		feeds := storage.QueryFeeds(request.Context(), query, offset, pageSize)
 
 		feedInfo := FeedInfo{
 			Query:    query,
@@ -130,7 +130,7 @@ func handleEntriesPost(templateExecutor TemplateExecutor, storage *Storage) http
 		pageSize := 10
 		offset := page * pageSize
 
-		entries := storage.QueryEntries(query, sortOrder, offset, pageSize)
+		entries := storage.QueryEntries(request.Context(), query, sortOrder, offset, pageSize)
 
 		entryInfo := EntryInfo{
 			Query:    formQuery,
