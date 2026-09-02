@@ -2,10 +2,8 @@ package website
 
 import (
 	"context"
-	"embed"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"slices"
 	"strings"
@@ -18,9 +16,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
-
-//go:embed all:sql
-var sqlFiles embed.FS
 
 type SortOrder int
 const (
@@ -35,16 +30,6 @@ func createStorage() (*pgxpool.Pool, error) {
 	pool, err := pgxpool.New(context.Background(), os.Getenv("DATABASE_URL"))
 	if err != nil {
 		return nil, fmt.Errorf("pgxpool new: %w", err)
-	}
-
-	init, err := fs.ReadFile(sqlFiles, "sql/init.sql")
-	if err != nil {
-		return nil, fmt.Errorf("fs read file: %w", err)
-	}
-
-	_, err = pool.Exec(context.Background(), string(init))
-	if err != nil {
-		return nil, fmt.Errorf("storage db exec: %w", err)
 	}
 
 	return pool, nil

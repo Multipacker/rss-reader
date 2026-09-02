@@ -15,6 +15,8 @@ import (
 	"Multipacker/rss-reader/src/feedparse"
 	"Multipacker/rss-reader/src/feeds"
 	"Multipacker/rss-reader/src/httphelpers"
+	"Multipacker/rss-reader/src/migration"
+	migrationTypes "Multipacker/rss-reader/src/migration/types"
 	"Multipacker/rss-reader/src/wayback"
 
 	"github.com/klauspost/compress/gzhttp"
@@ -219,6 +221,11 @@ func Execute() {
 	dbConnection, err := createStorage()
 	if err != nil {
 		log.Fatal(fmt.Errorf("failed to create storage: %w", err))
+	}
+
+	err = migration.Migrate(dbConnection, migrationTypes.MigrationVersion{})
+	if err != nil {
+		log.Fatal(fmt.Errorf("failed to migrate database: %w", err))
 	}
 
 	client := http.Client{
