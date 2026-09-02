@@ -25,3 +25,11 @@ func (executor DebugTemplateExecutor) ExecuteTemplate(writer io.Writer, name str
 	}
 	return templates.ExecuteTemplate(writer, name, data)
 }
+
+func NewTemplateExecutor(reload bool) TemplateExecutor {
+	if reload {
+		return DebugTemplateExecutor{ "src/website/templates/*.gohtml" }
+	} else {
+		return template.Must(template.ParseFS(templateFiles, "**/*.gohtml"))
+	}
+}

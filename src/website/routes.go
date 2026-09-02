@@ -2,7 +2,6 @@ package website
 
 import (
 	"embed"
-	"html/template"
 	"log"
 	"net/http"
 
@@ -34,22 +33,20 @@ func MiddlewareLogging(logger *log.Logger, next http.Handler) http.Handler {
 
 
 func NewWebsiteRoutes(reload bool, config Config, storage *Storage) http.Handler {
-	// NOTE(simon): Setup handler for reloading of static files
-	var staticHandler http.Handler
-	var templateExecutor TemplateExecutor
-	if reload {
-		staticHandler = http.StripPrefix("/static/", http.FileServer(http.Dir("static")))
-		templateExecutor = DebugTemplateExecutor{"templates/*.gohtml"}
-	} else {
-		staticHandler = http.FileServerFS(staticFiles)
-		templateExecutor = template.Must(template.ParseFS(templateFiles, "**/*.gohtml"))
-	}
+	templateExecutor := NewTemplateExecutor(reload)
 
 	mux := http.NewServeMux()
 	mux.Handle("/", HandleIndex(templateExecutor, storage))
-	mux.Handle("/static/", staticHandler)
+	// NOTE(simon): Allow reloading static files.
+	if reload {
+		mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("src/website/static"))))
+	} else {
+		mux.Handle("/static/", http.FileServerFS(staticFiles))
+	}
+
 	mux.Handle("GET /feeds", HandleFeedsGet(templateExecutor, storage))
 	mux.Handle("POST /feeds", HandleFeedsPost(templateExecutor, storage))
+
 	mux.Handle("GET /entries", HandleEntriesGet(templateExecutor, storage))
 	mux.Handle("POST /entries", HandleEntriesPost(templateExecutor, storage))
 
