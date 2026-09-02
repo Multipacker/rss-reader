@@ -14,6 +14,7 @@ import (
 	"Multipacker/rss-reader/src/db"
 	"Multipacker/rss-reader/src/feedparse"
 	"Multipacker/rss-reader/src/feeds"
+	"Multipacker/rss-reader/src/httphelpers"
 	"Multipacker/rss-reader/src/wayback"
 
 	"github.com/klauspost/compress/gzhttp"
@@ -192,6 +193,15 @@ func readConfig() (Config, error) {
 }
 
 
+func UserAgentRoundTripper(userAgent string, next http.RoundTripper) http.RoundTripper {
+	return httphelpers.RoundTripperFunc(func (request *http.Request) (*http.Response, error) {
+		if request.Header.Get("User-Agent") == "" {
+			request.Header.Set("User-Agent", userAgent)
+		}
+
+		return next.RoundTrip(request)
+	})
+}
 
 func Execute() {
 	// NOTE(simon): Configure the logger to give more accurate timing information.
@@ -212,7 +222,7 @@ func Execute() {
 	}
 
 	client := http.Client{
-		Transport: gzhttp.Transport(http.DefaultTransport),
+		Transport: gzhttp.Transport(UserAgentRoundTripper("SilverFeed/1.0", http.DefaultTransport)),
 	}
 
 	if true {

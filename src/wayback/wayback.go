@@ -14,6 +14,7 @@ import (
 	"Multipacker/rss-reader/src/db"
 	"Multipacker/rss-reader/src/feedparse"
 	"Multipacker/rss-reader/src/feeds"
+	"Multipacker/rss-reader/src/httphelpers"
 	"Multipacker/rss-reader/src/jobs"
 	"Multipacker/rss-reader/src/models"
 
@@ -46,62 +47,23 @@ func QuerySnapshots(client *http.Client, feedUrl string, lastPollTime time.Time)
 		query.Set("from", lastPollTime.UTC().Format(TimeFormat))
 	}
 
-	exponentialBackoffBase  := 1 * time.Minute
-	exponentialBackoffTries := 0
-
 	var snapshots []time.Time
 	for {
 		// NOTE(simon): Setup request with custom headers.
 		requestUrl.RawQuery = query.Encode()
 
-		// NOTE(simon): Issue request with query.
-		response, err := client.Get(requestUrl.String())
+		response, err := httphelpers.GetWithRetry(client, requestUrl.String())
 		if err != nil {
-			return nil, fmt.Errorf("http do: %v", err)
+			return nil, fmt.Errorf("failed to perform http request: %v", err)
 		}
 		defer response.Body.Close()
-
-		// NOTE(simon): Are we fetching too quickly? Take a break.
-		if response.StatusCode == http.StatusTooManyRequests {
-			response.Body.Close()
-
-			// NOTE(simon): Try to parse Retry-After as a duration.
-			waitDuration, retryErr := time.ParseDuration(response.Header.Get("Retry-After") + "s")
-
-			// NOTE(simon): Try to parse Retry-After as a specific date.
-			if retryErr != nil {
-				if retryDate, retryErr := http.ParseTime(response.Header.Get("Retry-After")); retryErr == nil {
-					waitDuration = time.Until(retryDate)
-				}
-			}
-
-			// NOTE(simon): We somehow failed to parse the date, use exponential backoff.
-			if retryErr != nil {
-				// NOTE(simon): Arbitrary decision to abort after 5 failed attempts of exponential backoff.
-				if exponentialBackoffTries > 5 {
-					return nil, fmt.Errorf("Received %v after %v attempts of exponential backoff", response.Status, exponentialBackoffTries)
-				}
-
-				waitDuration = exponentialBackoffBase * (1 << exponentialBackoffTries)
-				exponentialBackoffTries += 1
-			}
-
-			// NOTE(simon): Wait and then retry the same request again.
-			time.Sleep(waitDuration)
-			continue
-		} else if response.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("http do: %v", response.Status)
-		}
-
-		// NOTE(simon): We got a response! Reset backoff time in the hopes of faster answers.
-		exponentialBackoffTries = 0
 
 		// NOTE(simon): Parse format, just an array of records, which is an
 		// array of fields.
 		var records [][]string
 		err = json.NewDecoder(response.Body).Decode(&records)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to parse snapshots: %v", err)
 		}
 		response.Body.Close()
 
@@ -136,7 +98,6 @@ func QuerySnapshots(client *http.Client, feedUrl string, lastPollTime time.Time)
 
 			timestamp, err := time.Parse(TimeFormat, line[0])
 			mimetype       := line[1]
-
 			if err != nil {
 				return nil, fmt.Errorf("failed to parse snapshot time: %w", err)
 			}
