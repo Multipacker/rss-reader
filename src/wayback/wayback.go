@@ -1,31 +1,31 @@
 package wayback
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"slices"
 	"strings"
 	"time"
+
+	"Multipacker/rss-reader/src/db"
+	"Multipacker/rss-reader/src/feedparse"
+	"Multipacker/rss-reader/src/feeds"
+	"Multipacker/rss-reader/src/jobs"
+	"Multipacker/rss-reader/src/models"
+
+	"github.com/jackc/pgx/v5"
 )
 
 const (
 	TimeFormat string = "20060102150405"
 )
 
-func FetchSnapshot(client *http.Client, url string, date time.Time) (*http.Response, error) {
-	// TODO(simon): Honor 429 Too Many Requests and Retry-After
-
-	request, err := http.NewRequest("GET", "https://web.archive.org/web/" + date.Format(TimeFormat) + "id_/" + url, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	request.Header.Set("User-Agent", "SilverFeed/1.0")
-
-	response, err := client.Do(request)
-	return response, err
+func makeURL(snapshot models.FeedSnapshot) string {
+	return "https://web.archive.org/web/" + snapshot.Timestamp.Format(TimeFormat) + "id_/" + snapshot.Url
 }
 
 func QuerySnapshots(client *http.Client, feedUrl string, lastPollTime time.Time) ([]time.Time, error) {
@@ -53,11 +53,9 @@ func QuerySnapshots(client *http.Client, feedUrl string, lastPollTime time.Time)
 	for {
 		// NOTE(simon): Setup request with custom headers.
 		requestUrl.RawQuery = query.Encode()
-		request, _ := http.NewRequest("GET", requestUrl.String(), nil)
-		request.Header.Set("User-Agent", "SilverFeed/1.0")
 
 		// NOTE(simon): Issue request with query.
-		response, err := client.Do(request)
+		response, err := client.Get(requestUrl.String())
 		if err != nil {
 			return nil, fmt.Errorf("http do: %v", err)
 		}
@@ -166,4 +164,91 @@ func QuerySnapshots(client *http.Client, feedUrl string, lastPollTime time.Time)
 	}
 
 	return snapshots, nil
+}
+
+func fetchWaybackEntry(client *http.Client, context context.Context, dbConnection db.Database) (models.FeedSnapshot, error) {
+	// NOTE(simon): Fetch the latest snapshot.
+	snapshot, err := db.QueryOne[models.FeedSnapshot](
+		context,
+		dbConnection,
+		"SELECT url, timestamp FROM UnfetchedSnapshots ORDER BY timestamp DESC LIMIT 1",
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return models.FeedSnapshot{}, nil
+	}
+	if err != nil {
+		return models.FeedSnapshot{}, fmt.Errorf("failed to get latest snapshot: %w", err)
+	}
+
+	response, err := client.Get(makeURL(snapshot))
+	if err != nil {
+		return models.FeedSnapshot{}, fmt.Errorf("failed to fetch snapshot %v: %w", snapshot.Url, err)
+	}
+
+	defer response.Body.Close()
+
+	// NOTE(simon): On a bad response we just skip this URL.
+	if response.StatusCode != http.StatusOK {
+		return models.FeedSnapshot{}, fmt.Errorf("failed to fetch snapshot %v: %v", snapshot.Url, response.Status)
+	}
+
+	feed, entries, err := feedparse.Parse(response.Body, snapshot.Url)
+	if err != nil {
+		// TODO(simon): Failing to parse historic entries cannot be recovered, delete snapshot.
+		return models.FeedSnapshot{}, fmt.Errorf("failed to parse feed %v: %w", snapshot.Url, err)
+	}
+
+	transaction, err := dbConnection.Begin(context)
+	if err != nil {
+		return models.FeedSnapshot{}, fmt.Errorf("failed to start transaction: %w", err)
+	}
+	defer transaction.Rollback(context)
+	_, err = transaction.Exec(
+		context,
+		"DELETE FROM UnfetchedSnapshots WHERE url = @url AND timestamp = @timestamp",
+		pgx.NamedArgs{
+			"url":       snapshot.Url,
+			"timestamp": snapshot.Timestamp,
+		},
+	)
+	if err != nil {
+		return models.FeedSnapshot{}, fmt.Errorf("failed to remove snapshot: %w", err)
+	}
+	feeds.StoreFeed(context, dbConnection, feed, entries)
+
+	err = feeds.StoreFeed(context, dbConnection, feed, entries)
+	if err != nil {
+		return models.FeedSnapshot{}, fmt.Errorf("failed to store %v: %w", snapshot.Url, err)
+	}
+
+	err = transaction.Commit(context)
+	if err != nil {
+		return models.FeedSnapshot{}, fmt.Errorf("failed to commit transaction: %v", err)
+	}
+
+	return snapshot, nil
+}
+
+func FetchWaybackEntriesJob(client *http.Client, dbConnection db.Database) *jobs.Job {
+	job := jobs.New("fetch wayback entries")
+	go func() {
+		defer job.Finish()
+
+		tick := time.Tick(30 * time.Second)
+
+		for {
+			select {
+			case <-tick:
+				snapshot, err := fetchWaybackEntry(client, job.Context, dbConnection)
+				if err != nil {
+					job.Logger.Println(err)
+				} else if !snapshot.Timestamp.IsZero() {
+					job.Logger.Printf("Fetched %v\n", makeURL(snapshot))
+				}
+			case <-job.Canceled():
+				return
+			}
+		}
+	}()
+	return job
 }

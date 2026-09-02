@@ -11,7 +11,9 @@ import (
 	"sync"
 	"time"
 
+	"Multipacker/rss-reader/src/db"
 	"Multipacker/rss-reader/src/feedparse"
+	"Multipacker/rss-reader/src/feeds"
 	"Multipacker/rss-reader/src/wayback"
 
 	"github.com/klauspost/compress/gzhttp"
@@ -92,7 +94,7 @@ func pollUrl(client *http.Client, url string) (response *http.Response, changed 
 
 
 
-func updateFeed(client *http.Client, url string, storage *Storage) error {
+func updateFeed(client *http.Client, url string, dbConnection db.Database) error {
 	response, changed, err := pollUrl(client, url)
 	if err != nil {
 		return fmt.Errorf("poll url: %w", err)
@@ -114,16 +116,16 @@ func updateFeed(client *http.Client, url string, storage *Storage) error {
 		return fmt.Errorf("feed parse: %w", err)
 	}
 
-	storage.storeFeed(context.Background(), feed, entries)
+	feeds.StoreFeed(context.Background(), dbConnection, feed, entries)
 
 	return nil
 }
 
-func updateFeeds(client *http.Client, storage *Storage) {
+func updateFeeds(client *http.Client, dbConnection db.Database) {
 	log.Println("INFO: Updating feeds")
 	beforeUpdate := time.Now()
 
-	feeds, err := storage.Feeds(context.Background())
+	feeds, err := Feeds(context.Background(), dbConnection)
 	if err != nil {
 		log.Println(err)
 	}
@@ -134,7 +136,7 @@ func updateFeeds(client *http.Client, storage *Storage) {
 		wg.Add(1)
 		go func(link string) {
 			defer wg.Done()
-			err := updateFeed(client, link, storage)
+			err := updateFeed(client, link, dbConnection)
 			if err != nil {
 				log.Println(err)
 			}
@@ -146,53 +148,13 @@ func updateFeeds(client *http.Client, storage *Storage) {
 	log.Printf("INFO: Feed updated finished: %s\n", time.Since(beforeUpdate))
 }
 
-func fetchWaybackEntry(client *http.Client, storage *Storage) error {
-	snapshot, err := storage.getLatestSnapshot(context.Background())
-
-	// NOTE(simon): No snapshots left? Quit
-	if err != nil{
-		return fmt.Errorf("failed to get latest snapshot: %w\n", err)
-	}
-
-	log.Printf("Fetching snapshot %v@%v\n", snapshot.Url, snapshot.Timestamp)
-
-	response, err := wayback.FetchSnapshot(client, snapshot.Url, snapshot.Timestamp)
-
-	// NOTE(simon): We failed to fetch the entry, requeue it for later processing.
-	if err != nil {
-		return fmt.Errorf("failed to fetch snapshot %v: %w", snapshot.Url, err)
-	}
-	defer response.Body.Close()
-
-	// NOTE(simon): On a bad response we just skip this URL.
-	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("failed to fetch snapshot %v: %v", snapshot.Url, response.Status)
-	}
-
-	feed, entries, err := feedparse.Parse(response.Body, snapshot.Url)
-
-	// NOTE(simon): Failing to parse historic entries cannot be recovered.
-	if err != nil {
-		return fmt.Errorf("failed to parse feed %v: %w", snapshot.Url, err)
-	}
-
-	storage.storeFeedSnapshot(context.Background(), snapshot.Timestamp, feed, entries)
-	return nil
-}
-
-func update(client *http.Client, storage *Storage) {
-	updateFeedsTick       := time.Tick(24 * time.Hour)
-	fetchWaybackEntryTick := time.Tick(30 * time.Second)
+func update(client *http.Client, dbConnection db.Database) {
+	updateFeedsTick := time.Tick(24 * time.Hour)
 
 	for {
 		select {
 		case <- updateFeedsTick:
-			updateFeeds(client, storage)
-		case <- fetchWaybackEntryTick:
-			err := fetchWaybackEntry(client, storage)
-			if err != nil {
-				log.Println(err)
-			}
+			updateFeeds(client, dbConnection)
 		}
 	}
 }
@@ -244,7 +206,7 @@ func Execute() {
 		log.Fatal(fmt.Errorf("failed to read config: %w", err))
 	}
 
-	storage, err := createStorage()
+	dbConnection, err := createStorage()
 	if err != nil {
 		log.Fatal(fmt.Errorf("failed to create storage: %w", err))
 	}
@@ -257,13 +219,13 @@ func Execute() {
 	// NOTE(simon): Fetch initial feeds
 	log.Println("Fetching feeds from config")
 	for _, feed := range config.Feeds {
-		go updateFeed(&client, feed.Url, storage)
+		go updateFeed(&client, feed.Url, dbConnection)
 	}
 
 	go func () {
 		for _, feed := range config.Feeds {
 			timeBeforePoll := time.Now()
-			lastPollTime, err := storage.getLatestSnapshotTime(context.Background(), feed.Url)
+			lastPollTime, err := getLatestSnapshotTime(context.Background(), dbConnection, feed.Url)
 			if err != nil {
 				log.Println("failed to get latest snapshot %v: %w", feed.Url, err)
 				continue
@@ -277,7 +239,7 @@ func Execute() {
 			}
 			log.Printf("Got %v new snapthots for %v\n", len(snapshots), feed.Url)
 
-			err = storage.addSnapshots(context.Background(), feed.Url, timeBeforePoll, snapshots)
+			err = addSnapshots(context.Background(), dbConnection, feed.Url, timeBeforePoll, snapshots)
 			if err != nil {
 				log.Printf("failed to add snapshots %v: %v\n", feed.Url, err)
 			}
@@ -285,10 +247,11 @@ func Execute() {
 	}()
 
 	// NOTE(simon): Start feed update process.
-	go update(&client, storage)
+	go update(&client, dbConnection)
+	wayback.FetchWaybackEntriesJob(&client, dbConnection)
 	}
 
-	handler := NewWebsiteRoutes(*reload, config, storage)
+	handler := NewWebsiteRoutes(*reload, config, dbConnection)
 
 	address := fmt.Sprintf("%s:%d", config.Host, config.Port)
 	log.Printf("INFO: Serving on http://%s", address)

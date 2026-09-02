@@ -28,95 +28,26 @@ const (
 	SortOrderOldestFirst
 )
 
-type Storage struct {
-	db *pgxpool.Pool
-}
 
 
-
-func createStorage() (*Storage, error) {
-	storage := new(Storage)
-
+func createStorage() (*pgxpool.Pool, error) {
 	// NOTE(simon): Open database connection
 	pool, err := pgxpool.New(context.Background(), os.Getenv("DATABASE_URL"))
 	if err != nil {
 		return nil, fmt.Errorf("pgxpool new: %w", err)
 	}
-	storage.db = pool
 
 	init, err := fs.ReadFile(sqlFiles, "sql/init.sql")
 	if err != nil {
 		return nil, fmt.Errorf("fs read file: %w", err)
 	}
 
-	_, err = storage.db.Exec(context.Background(), string(init))
+	_, err = pool.Exec(context.Background(), string(init))
 	if err != nil {
 		return nil, fmt.Errorf("storage db exec: %w", err)
 	}
 
-	return storage, nil
-}
-
-func (storage *Storage) storeFeed(context context.Context, feed feedparse.Feed, entries []feedparse.Entry) error {
-	return storage.storeFeedSnapshot(context, time.Time{}, feed, entries)
-}
-
-func (storage *Storage) storeFeedSnapshot(context context.Context, snapshotTime time.Time, feed feedparse.Feed, entries []feedparse.Entry) error {
-	transaction, err := storage.db.Begin(context)
-	if err != nil {
-		return fmt.Errorf("failed to start transaction: %w", err)
-	}
-	defer transaction.Rollback(context)
-
-	batch := pgx.Batch{}
-	if !snapshotTime.IsZero() {
-		batch.Queue(
-			"DELETE FROM UnfetchedSnapshots WHERE url = @url AND timestamp = @timestamp",
-			pgx.NamedArgs{
-				"url":       feed.Link,
-				"timestamp": snapshotTime,
-			},
-		)
-	}
-
-	batch.Queue(
-		`INSERT INTO Feeds (externalId, title, description, url, updated) VALUES (@id, @title, @description, @url, @updated)
-		ON CONFLICT (externalId) DO UPDATE SET title = @title, description = @description, url = @url, updated = @updated WHERE Feeds.updated < @updated`,
-		pgx.NamedArgs{
-			"id":          feed.Id,
-			"title":       feed.Title,
-			"description": feed.Description,
-			"url":         feed.Link,
-			"updated":     feed.Updated,
-		},
-	)
-
-	for _, entry := range entries {
-		batch.Queue(
-			`INSERT INTO Entries (feed, externalId, title, url, published, updated) VALUES ((SELECT id FROM Feeds WHERE externalId = @feed), @id, @title, @url, @published, @updated)
-			ON CONFLICT (externalId) DO UPDATE SET title = @title, url = @url, updated = @updated WHERE Entries.updated < @updated`,
-			pgx.NamedArgs{
-				"id":          entry.Id,
-				"feed":        feed.Id,
-				"title":       entry.Title,
-				"url":         entry.Link,
-				"published":   entry.Published,
-				"updated":     entry.Updated,
-			},
-		)
-	}
-
-	err = transaction.SendBatch(context, &batch).Close()
-	if err != nil {
-		return fmt.Errorf("failed to send batch: %v", err)
-	}
-
-	err = transaction.Commit(context)
-	if err != nil {
-		return fmt.Errorf("failed to commit transaction: %v", err)
-	}
-
-	return nil
+	return pool, nil
 }
 
 
@@ -129,10 +60,10 @@ type FeedDescription struct {
 	HighlightTitle HighlightString
 }
 
-func (storage *Storage) QueryFeeds(context context.Context, query string, offset int, size int) ([]FeedDescription, error) {
+func QueryFeeds(context context.Context, dbConnection db.Database, query string, offset int, size int) ([]FeedDescription, error) {
 	queryWords := strings.Fields(strings.ToLower(query))
 
-	feeds, err := storage.Feeds(context)
+	feeds, err := Feeds(context, dbConnection)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch feeds: %w", err)
 	}
@@ -192,8 +123,8 @@ func (storage *Storage) QueryFeeds(context context.Context, query string, offset
 	return descriptions, nil
 }
 
-func (storage *Storage) Feeds(context context.Context) ([]feedparse.Feed, error) {
-	feeds, err := db.Query[feedparse.Feed](context, storage.db, "SELECT (id, title, description, url as link, updated) FROM Feeds ORDER BY title")
+func Feeds(context context.Context, dbConnection db.Database) ([]feedparse.Feed, error) {
+	feeds, err := db.Query[feedparse.Feed](context, dbConnection, "SELECT (id, title, description, url as link, updated) FROM Feeds ORDER BY title")
 	if err != nil {
 		return nil, fmt.Errorf("failed to query feeds: %w", err)
 	}
@@ -214,7 +145,7 @@ type EntryDescription struct {
 	HighlightFeed  HighlightString
 }
 
-func (storage *Storage) QueryEntries(context context.Context, query string, sortOrder SortOrder, offset int, size int) ([]EntryDescription, error) {
+func QueryEntries(context context.Context, dbConnection db.Database, query string, sortOrder SortOrder, offset int, size int) ([]EntryDescription, error) {
 	queryWords := strings.Fields(strings.ToLower(query))
 
 	// NOTE(simon): Collect entries to descriptions.
@@ -229,7 +160,7 @@ func (storage *Storage) QueryEntries(context context.Context, query string, sort
 			Entries JOIN Feeds ON feed = Feeds.id
 		ORDER BY published
 	`
-	descriptions, err := db.QueryLax[EntryDescription](context, storage.db, entryQuery)
+	descriptions, err := db.QueryLax[EntryDescription](context, dbConnection, entryQuery)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query entries: %w", err)
 	}
@@ -302,8 +233,8 @@ func (storage *Storage) QueryEntries(context context.Context, query string, sort
 	return descriptions, nil
 }
 
-func (storage *Storage) Entries(context context.Context) ([]feedparse.Entry, error) {
-	entries, err := db.Query[feedparse.Entry](context, storage.db, "SELECT id, feed, title, url AS link, updated, published FROM Entries")
+func Entries(context context.Context, dbConnection db.Database) ([]feedparse.Entry, error) {
+	entries, err := db.Query[feedparse.Entry](context, dbConnection, "SELECT id, feed, title, url AS link, updated, published FROM Entries")
 	if err != nil {
 		return nil, fmt.Errorf("failed to query entries: %w", err)
 	}
@@ -313,8 +244,8 @@ func (storage *Storage) Entries(context context.Context) ([]feedparse.Entry, err
 
 
 
-func (storage *Storage) addSnapshots(context context.Context, url string, timestamp time.Time, snapshots []time.Time) error {
-	transaction, err := storage.db.Begin(context)
+func addSnapshots(context context.Context, dbConnection db.Database, url string, timestamp time.Time, snapshots []time.Time) error {
+	transaction, err := dbConnection.Begin(context)
 	if err != nil {
 		return fmt.Errorf("failed to start transaction: %w", err)
 	}
@@ -356,10 +287,10 @@ func (storage *Storage) addSnapshots(context context.Context, url string, timest
 	return nil
 }
 
-func (storage *Storage) getLatestSnapshotTime(context context.Context, url string) (time.Time, error) {
+func getLatestSnapshotTime(context context.Context, dbConnection db.Database, url string) (time.Time, error) {
 	snapshot, err := db.QueryOne[models.SnapshotTime](
 		context,
-		storage.db,
+		dbConnection,
 		"SELECT url, updated FROM SnapshotTimes WHERE url = $1",
 		url,
 	)
@@ -374,18 +305,4 @@ func (storage *Storage) getLatestSnapshotTime(context context.Context, url strin
 	}
 
 	return snapshot.Updated, nil
-}
-
-func (storage *Storage) getLatestSnapshot(context context.Context) (models.FeedSnapshot, error) {
-	snapshot, err := db.QueryOne[models.FeedSnapshot](
-		context,
-		storage.db,
-		"SELECT url, timestamp FROM UnfetchedSnapshots ORDER BY timestamp DESC LIMIT 1",
-	)
-
-	if err != nil {
-		return models.FeedSnapshot{}, fmt.Errorf("failed to query latest snapshot: %w\n", err)
-	}
-
-	return snapshot, nil
 }

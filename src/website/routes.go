@@ -5,6 +5,8 @@ import (
 	"log"
 	"net/http"
 
+	"Multipacker/rss-reader/src/db"
+
 	"github.com/klauspost/compress/gzhttp"
 )
 
@@ -15,7 +17,7 @@ var staticFiles embed.FS
 
 
 
-func HandleIndex(templateExecutor TemplateExecutor, storage *Storage) http.HandlerFunc {
+func HandleIndex(templateExecutor TemplateExecutor) http.HandlerFunc {
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		http.Redirect(response, request, "/entries", http.StatusFound)
 	})
@@ -32,11 +34,11 @@ func MiddlewareLogging(logger *log.Logger, next http.Handler) http.Handler {
 
 
 
-func NewWebsiteRoutes(reload bool, config Config, storage *Storage) http.Handler {
+func NewWebsiteRoutes(reload bool, config Config, dbConnection db.Database) http.Handler {
 	templateExecutor := NewTemplateExecutor(reload)
 
 	mux := http.NewServeMux()
-	mux.Handle("/", HandleIndex(templateExecutor, storage))
+	mux.Handle("/", HandleIndex(templateExecutor))
 	// NOTE(simon): Allow reloading static files.
 	if reload {
 		mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("src/website/static"))))
@@ -44,11 +46,11 @@ func NewWebsiteRoutes(reload bool, config Config, storage *Storage) http.Handler
 		mux.Handle("/static/", http.FileServerFS(staticFiles))
 	}
 
-	mux.Handle("GET /feeds", HandleFeedsGet(templateExecutor, storage))
-	mux.Handle("POST /feeds", HandleFeedsPost(templateExecutor, storage))
+	mux.Handle("GET /feeds", HandleFeedsGet(templateExecutor))
+	mux.Handle("POST /feeds", HandleFeedsPost(templateExecutor, dbConnection))
 
-	mux.Handle("GET /entries", HandleEntriesGet(templateExecutor, storage))
-	mux.Handle("POST /entries", HandleEntriesPost(templateExecutor, storage))
+	mux.Handle("GET /entries", HandleEntriesGet(templateExecutor))
+	mux.Handle("POST /entries", HandleEntriesPost(templateExecutor, dbConnection))
 
 	gzWrapper, err := gzhttp.NewWrapper()
 	if err != nil {

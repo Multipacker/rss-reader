@@ -5,9 +5,11 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+
+	"Multipacker/rss-reader/src/db"
 )
 
-func HandleEntriesGet(templateExecutor TemplateExecutor, storage *Storage) http.Handler {
+func HandleEntriesGet(templateExecutor TemplateExecutor) http.Handler {
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		err := templateExecutor.ExecuteTemplate(response, "entries.gohtml", nil)
 		if err != nil {
@@ -16,7 +18,7 @@ func HandleEntriesGet(templateExecutor TemplateExecutor, storage *Storage) http.
 	})
 }
 
-func HandleEntriesPost(templateExecutor TemplateExecutor, storage *Storage) http.Handler {
+func HandleEntriesPost(templateExecutor TemplateExecutor, dbConnection db.Database) http.Handler {
 	type EntryInfo struct {
 		Query string
 		Order string
@@ -43,7 +45,7 @@ func HandleEntriesPost(templateExecutor TemplateExecutor, storage *Storage) http
 		pageSize := 10
 		offset := page * pageSize
 
-		entries, err := storage.QueryEntries(request.Context(), query, sortOrder, offset, pageSize)
+		entries, err := QueryEntries(request.Context(), dbConnection, query, sortOrder, offset, pageSize)
 		if err != nil {
 			// TODO(simon): Render error page
 			log.Println(err)

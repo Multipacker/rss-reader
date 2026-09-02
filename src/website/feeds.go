@@ -5,9 +5,11 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+
+	"Multipacker/rss-reader/src/db"
 )
 
-func HandleFeedsGet(templateExecutor TemplateExecutor, storage *Storage) http.Handler {
+func HandleFeedsGet(templateExecutor TemplateExecutor) http.Handler {
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		err := templateExecutor.ExecuteTemplate(response, "feeds.gohtml", nil)
 		if err != nil {
@@ -16,7 +18,7 @@ func HandleFeedsGet(templateExecutor TemplateExecutor, storage *Storage) http.Ha
 	})
 }
 
-func HandleFeedsPost(templateExecutor TemplateExecutor, storage *Storage) http.Handler {
+func HandleFeedsPost(templateExecutor TemplateExecutor, dbConnection db.Database) http.Handler {
 	type FeedInfo struct {
 		Query string
 
@@ -35,7 +37,7 @@ func HandleFeedsPost(templateExecutor TemplateExecutor, storage *Storage) http.H
 		pageSize := 10
 		offset := page * pageSize
 
-		feeds, err := storage.QueryFeeds(request.Context(), query, offset, pageSize)
+		feeds, err := QueryFeeds(request.Context(), dbConnection, query, offset, pageSize)
 		if err != nil {
 			// TODO(simon): Render error page
 			log.Println(err)
