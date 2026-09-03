@@ -24,7 +24,7 @@ const (
 	TimeFormat string = "20060102150405"
 )
 
-func makeURL(snapshot models.FeedSnapshot) string {
+func urlFromSnapshot(snapshot models.FeedSnapshot) string {
 	return "https://web.archive.org/web/" + snapshot.Timestamp.Format(TimeFormat) + "id_/" + snapshot.Url
 }
 
@@ -140,22 +140,33 @@ func fetchWaybackEntry(client *http.Client, context context.Context, dbConnectio
 		return models.FeedSnapshot{}, fmt.Errorf("failed to get latest snapshot: %w", err)
 	}
 
-	response, err := client.Get(makeURL(snapshot))
+	response, err := client.Get(urlFromSnapshot(snapshot))
 	if err != nil {
-		return models.FeedSnapshot{}, fmt.Errorf("failed to fetch snapshot %v: %w", snapshot.Url, err)
+		return models.FeedSnapshot{}, fmt.Errorf("failed to fetch snapshot: %w", err)
 	}
 
 	defer response.Body.Close()
 
 	// NOTE(simon): On a bad response we just skip this URL.
 	if response.StatusCode != http.StatusOK {
-		return models.FeedSnapshot{}, fmt.Errorf("failed to fetch snapshot %v: %v", snapshot.Url, response.Status)
+		return models.FeedSnapshot{}, fmt.Errorf("failed to fetch snapshot: %v", response.Status)
 	}
 
 	feed, entries, err := feedparse.Parse(response.Body, snapshot.Url)
 	if err != nil {
-		// TODO(simon): Failing to parse historic entries cannot be recovered, delete snapshot.
-		return models.FeedSnapshot{}, fmt.Errorf("failed to parse feed %v: %w", snapshot.Url, err)
+		// NOTE(simon): Failing to parse historic entries cannot be recovered,
+		// remove the snapshot.
+		_, removeErr := dbConnection.Exec(
+			context,
+			"DELETE FROM UnfetchedSnapshots WHERE url = $1 AND timestamp = $2",
+			snapshot.Url,
+			snapshot.Timestamp,
+		)
+		if removeErr != nil {
+			return models.FeedSnapshot{}, fmt.Errorf("failed to parse feed; unable to remove snapshot: %w", err)
+		} else {
+			return models.FeedSnapshot{}, fmt.Errorf("failed to parse feed; removing snapshot: %w", err)
+		}
 	}
 
 	transaction, err := dbConnection.Begin(context)
@@ -165,20 +176,17 @@ func fetchWaybackEntry(client *http.Client, context context.Context, dbConnectio
 	defer transaction.Rollback(context)
 	_, err = transaction.Exec(
 		context,
-		"DELETE FROM UnfetchedSnapshots WHERE url = @url AND timestamp = @timestamp",
-		pgx.NamedArgs{
-			"url":       snapshot.Url,
-			"timestamp": snapshot.Timestamp,
-		},
+		"DELETE FROM UnfetchedSnapshots WHERE url = $1 AND timestamp = $2",
+		snapshot.Url,
+		snapshot.Timestamp,
 	)
 	if err != nil {
 		return models.FeedSnapshot{}, fmt.Errorf("failed to remove snapshot: %w", err)
 	}
-	feeds.StoreFeed(context, dbConnection, feed, entries)
 
 	err = feeds.StoreFeed(context, dbConnection, feed, entries)
 	if err != nil {
-		return models.FeedSnapshot{}, fmt.Errorf("failed to store %v: %w", snapshot.Url, err)
+		return models.FeedSnapshot{}, fmt.Errorf("failed to store feed: %w", err)
 	}
 
 	err = transaction.Commit(context)
@@ -201,9 +209,9 @@ func FetchWaybackEntriesJob(client *http.Client, dbConnection db.Database) *jobs
 			case <-tick:
 				snapshot, err := fetchWaybackEntry(client, job.Context, dbConnection)
 				if err != nil {
-					job.Logger.Println(err)
+					job.Logger.Printf("failed to fetch %v: %w\n", urlFromSnapshot(snapshot), err)
 				} else if !snapshot.Timestamp.IsZero() {
-					job.Logger.Printf("Fetched %v\n", makeURL(snapshot))
+					job.Logger.Printf("Fetched %v\n", urlFromSnapshot(snapshot))
 				}
 			case <-job.Canceled():
 				return
