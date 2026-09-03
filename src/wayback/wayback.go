@@ -14,7 +14,6 @@ import (
 	"Multipacker/rss-reader/src/db"
 	"Multipacker/rss-reader/src/feedparse"
 	"Multipacker/rss-reader/src/feeds"
-	"Multipacker/rss-reader/src/httphelpers"
 	"Multipacker/rss-reader/src/jobs"
 	"Multipacker/rss-reader/src/models"
 
@@ -52,7 +51,7 @@ func QuerySnapshots(client *http.Client, feedUrl string, lastPollTime time.Time)
 		// NOTE(simon): Setup request with custom headers.
 		requestUrl.RawQuery = query.Encode()
 
-		response, err := httphelpers.GetWithRetry(client, requestUrl.String())
+		response, err := client.Get(requestUrl.String())
 		if err != nil {
 			return nil, fmt.Errorf("failed to perform http request: %v", err)
 		}

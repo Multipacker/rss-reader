@@ -194,17 +194,6 @@ func readConfig() (Config, error) {
 	return config, nil
 }
 
-
-func UserAgentRoundTripper(userAgent string, next http.RoundTripper) http.RoundTripper {
-	return httphelpers.RoundTripperFunc(func (request *http.Request) (*http.Response, error) {
-		if request.Header.Get("User-Agent") == "" {
-			request.Header.Set("User-Agent", userAgent)
-		}
-
-		return next.RoundTrip(request)
-	})
-}
-
 func Execute() {
 	// NOTE(simon): Configure the logger to give more accurate timing information.
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
@@ -229,7 +218,7 @@ func Execute() {
 	}
 
 	client := http.Client{
-		Transport: gzhttp.Transport(UserAgentRoundTripper("SilverFeed/1.0", http.DefaultTransport)),
+		Transport: gzhttp.Transport(httphelpers.RetryRoundTripper(5, 100 * time.Millisecond, httphelpers.UserAgentRoundTripper("SilverFeed/1.0", http.DefaultTransport))),
 	}
 
 	if true {
