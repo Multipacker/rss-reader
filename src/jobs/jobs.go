@@ -27,6 +27,27 @@ func New(name string) *Job {
 	}
 }
 
+func NewPeriodic(name string, period time.Duration, f func(*Job)) *Job {
+	job := New(name)
+	go func() {
+		defer job.Finish()
+
+		tick := time.Tick(period)
+
+		for {
+			f(job)
+
+			select {
+			case <-tick:
+				continue
+			case <-job.Canceled():
+				return
+			}
+		}
+	}()
+	return job
+}
+
 func (job *Job) Cancel() {
 	job.cancel()
 }
