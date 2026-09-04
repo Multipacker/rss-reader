@@ -2,7 +2,6 @@ package website
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"slices"
@@ -11,9 +10,7 @@ import (
 
 	"Multipacker/rss-reader/src/db"
 	"Multipacker/rss-reader/src/feedparse"
-	"Multipacker/rss-reader/src/models"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -225,69 +222,4 @@ func Entries(context context.Context, dbConnection db.Database) ([]feedparse.Ent
 	}
 
 	return entries, nil
-}
-
-
-
-func addSnapshots(context context.Context, dbConnection db.Database, url string, timestamp time.Time, snapshots []time.Time) error {
-	transaction, err := dbConnection.Begin(context)
-	if err != nil {
-		return fmt.Errorf("failed to start transaction: %w", err)
-	}
-	defer transaction.Rollback(context)
-
-	_, err = transaction.Exec(
-		context,
-		`INSERT INTO SnapshotTimes VALUES (@url, @timestamp) ON CONFLICT (url) DO UPDATE SET updated = @timestamp`,
-		pgx.NamedArgs{
-			"url":       url,
-			"timestamp": timestamp,
-		},
-	)
-	if err != nil {
-		return fmt.Errorf("failed to update snapshot time: %w", err)
-	}
-
-	batch := pgx.Batch{}
-	for _, snapshot := range snapshots {
-		batch.Queue(
-			"INSERT INTO UnfetchedSnapshots VALUES (@url, @timestamp) ON CONFLICT DO NOTHING",
-			pgx.NamedArgs{
-				"url":       url,
-				"timestamp": snapshot,
-			},
-		)
-	}
-
-	err = transaction.SendBatch(context, &batch).Close()
-	if err != nil {
-		return fmt.Errorf("failed to send batch: %w", err)
-	}
-
-	err = transaction.Commit(context)
-	if err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
-	}
-
-	return nil
-}
-
-func getLatestSnapshotTime(context context.Context, dbConnection db.Database, url string) (time.Time, error) {
-	snapshot, err := db.QueryOne[models.SnapshotTime](
-		context,
-		dbConnection,
-		"SELECT url, updated FROM SnapshotTimes WHERE url = $1",
-		url,
-	)
-
-	// NOTE(simon): No rows, return zero time.
-	if errors.Is(err, pgx.ErrNoRows) {
-		return time.Time{}, nil
-	}
-
-	if err != nil {
-		return time.Time{}, fmt.Errorf("failed to query latest snapshot time: %w\n", err)
-	}
-
-	return snapshot.Updated, nil
 }

@@ -169,54 +169,94 @@ func fetchWaybackEntry(client *http.Client, context context.Context, dbConnectio
 		}
 	}
 
-	transaction, err := dbConnection.Begin(context)
-	if err != nil {
-		return models.FeedSnapshot{}, fmt.Errorf("failed to start transaction: %w", err)
-	}
-	defer transaction.Rollback(context)
-	_, err = transaction.Exec(
-		context,
-		"DELETE FROM UnfetchedSnapshots WHERE url = $1 AND timestamp = $2",
-		snapshot.Url,
-		snapshot.Timestamp,
-	)
-	if err != nil {
-		return models.FeedSnapshot{}, fmt.Errorf("failed to remove snapshot: %w", err)
-	}
+	err = db.Transaction(context, dbConnection, func (dbConnection db.Database) error {
+		_, err := dbConnection.Exec(
+			context,
+			"DELETE FROM UnfetchedSnapshots WHERE url = $1 AND timestamp = $2",
+			snapshot.Url,
+			snapshot.Timestamp,
+		)
+		if err != nil {
+			return fmt.Errorf("failed to remove snapshot: %w", err)
+		}
 
-	err = feeds.StoreFeed(context, dbConnection, feed, entries)
-	if err != nil {
-		return models.FeedSnapshot{}, fmt.Errorf("failed to store feed: %w", err)
-	}
+		err = feeds.StoreFeed(context, dbConnection, feed, entries)
+		if err != nil {
+			return fmt.Errorf("failed to store feed: %w", err)
+		}
 
-	err = transaction.Commit(context)
+		return nil
+	})
 	if err != nil {
-		return models.FeedSnapshot{}, fmt.Errorf("failed to commit transaction: %v", err)
+		return models.FeedSnapshot{}, err
 	}
 
 	return snapshot, nil
 }
 
 func FetchWaybackEntriesJob(client *http.Client, dbConnection db.Database) *jobs.Job {
-	job := jobs.New("fetch wayback entries")
-	go func() {
-		defer job.Finish()
+	job := jobs.NewPeriodic("fetch wayback entries", 30 * time.Second, func(job *jobs.Job) {
+		snapshot, err := fetchWaybackEntry(client, job.Context, dbConnection)
+		if err != nil {
+			job.Logger.Printf("failed to fetch %v: %v\n", urlFromSnapshot(snapshot), err)
+		} else if !snapshot.Timestamp.IsZero() {
+			job.Logger.Printf("Fetched %v\n", urlFromSnapshot(snapshot))
+		}
+	})
+	return job
+}
 
-		tick := time.Tick(30 * time.Second)
+func fetchSnapshots(client *http.Client, context context.Context, dbConnection db.Database, feed models.Feed) (int, error) {
+	timeBeforePoll := time.Now()
 
-		for {
-			select {
-			case <-tick:
-				snapshot, err := fetchWaybackEntry(client, job.Context, dbConnection)
-				if err != nil {
-					job.Logger.Printf("failed to fetch %v: %w\n", urlFromSnapshot(snapshot), err)
-				} else if !snapshot.Timestamp.IsZero() {
-					job.Logger.Printf("Fetched %v\n", urlFromSnapshot(snapshot))
-				}
-			case <-job.Canceled():
-				return
+	// NOTE(simon): Fetch latest snapshot time for this feed.
+	var lastPollTime time.Time
+	err := dbConnection.QueryRow(context, "SELECT updated FROM SnapshotTimes WHERE url = $1", feed.Url).Scan(&lastPollTime)
+	if errors.Is(err, pgx.ErrNoRows) {
+		lastPollTime = time.Time{}
+	}
+	if err != nil {
+		return 0, fmt.Errorf("failed to query latest snapshot time: %w\n", err)
+	}
+
+	// NOTE(simon): Query snapshots since last query.
+	snapshots, err := QuerySnapshots(client, feed.Url, lastPollTime)
+	if err != nil {
+		return 0, fmt.Errorf("failed to fetch snapshots %v: %v\n", feed.Url, err)
+	}
+
+	// NOTE(simon): Build all updates into a batch (implicit transaction).
+	batch := pgx.Batch{}
+	batch.Queue("INSERT INTO SnapshotTimes VALUES ($1, $2) ON CONFLICT (url) DO UPDATE SET updated = $2", feed.Url, timeBeforePoll)
+	for _, snapshot := range snapshots {
+		batch.Queue("INSERT INTO UnfetchedSnapshots VALUES ($1, $2) ON CONFLICT DO NOTHING", feed.Url, snapshot)
+	}
+
+	err = dbConnection.SendBatch(context, &batch).Close()
+	if err != nil {
+		return 0, fmt.Errorf("failed to store snapshots: %w", err)
+	}
+
+	return len(snapshots), nil
+}
+
+func FetchWaybackSnapshotsJob(client *http.Client, dbConnection db.Database) *jobs.Job {
+	job := jobs.NewPeriodic("fetch wayback snapshots", 30 * 24 * time.Hour, func(job *jobs.Job) {
+		feeds, err := db.Query[models.Feed](job.Context, dbConnection, "SELECT * FROM Feeds")
+		if err != nil {
+			job.Logger.Printf("Failed to get feeds: %v", err)
+			return
+		}
+
+		for _, feed := range feeds {
+			job.Logger.Printf("Fetching snapshots for %v\n", feed.Url)
+			snapshotCount, err := fetchSnapshots(client, job.Context, dbConnection, feed)
+			if err != nil {
+				job.Logger.Printf("Failed to fetch snapshots for %v: %v\n", feed.Url, err)
+			} else {
+				job.Logger.Printf("Fetched %v new snapthots for %v\n", snapshotCount, feed.Url)
 			}
 		}
-	}()
+	})
 	return job
 }

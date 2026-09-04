@@ -228,29 +228,7 @@ func Execute() {
 		go updateFeed(&client, feed.Url, dbConnection)
 	}
 
-	go func () {
-		for _, feed := range config.Feeds {
-			timeBeforePoll := time.Now()
-			lastPollTime, err := getLatestSnapshotTime(context.Background(), dbConnection, feed.Url)
-			if err != nil {
-				log.Println("failed to get latest snapshot %v: %w", feed.Url, err)
-				continue
-			}
-
-			log.Printf("Fetching snapshots for %v\n", feed.Url)
-			snapshots, err := wayback.QuerySnapshots(&client, feed.Url, lastPollTime)
-			if err != nil {
-				log.Printf("failed to fetch snapshots %v: %v\n", feed.Url, err)
-				continue
-			}
-			log.Printf("Got %v new snapthots for %v\n", len(snapshots), feed.Url)
-
-			err = addSnapshots(context.Background(), dbConnection, feed.Url, timeBeforePoll, snapshots)
-			if err != nil {
-				log.Printf("failed to add snapshots %v: %v\n", feed.Url, err)
-			}
-		}
-	}()
+	wayback.FetchWaybackSnapshotsJob(&client, dbConnection)
 
 	// NOTE(simon): Start feed update process.
 	go update(&client, dbConnection)
