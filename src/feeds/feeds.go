@@ -11,12 +11,7 @@ import (
 )
 
 func StoreFeed(context context.Context, dbConnection db.Database, feed feedparse.Feed, entries []feedparse.Entry) error {
-	transaction, err := dbConnection.Begin(context)
-	if err != nil {
-		return fmt.Errorf("failed to start transaction: %w", err)
-	}
-	defer transaction.Rollback(context)
-
+	// NOTE(simon): Build all updates into a batch (implicit transaction).
 	batch := pgx.Batch{}
 	batch.Queue(
 		`INSERT INTO Feeds (externalId, title, description, url, updated) VALUES (@id, @title, @description, @url, @updated)
@@ -29,7 +24,6 @@ func StoreFeed(context context.Context, dbConnection db.Database, feed feedparse
 			"updated":     feed.Updated,
 		},
 	)
-
 	for _, entry := range entries {
 		batch.Queue(
 			`INSERT INTO Entries (feed, externalId, title, url, published, updated) VALUES ((SELECT id FROM Feeds WHERE externalId = @feed), @id, @title, @url, @published, @updated)
@@ -45,14 +39,9 @@ func StoreFeed(context context.Context, dbConnection db.Database, feed feedparse
 		)
 	}
 
-	err = transaction.SendBatch(context, &batch).Close()
+	err := dbConnection.SendBatch(context, &batch).Close()
 	if err != nil {
-		return fmt.Errorf("failed to send batch: %v", err)
-	}
-
-	err = transaction.Commit(context)
-	if err != nil {
-		return fmt.Errorf("failed to commit transaction: %v", err)
+		return fmt.Errorf("failed to store feed: %v", err)
 	}
 
 	return nil
