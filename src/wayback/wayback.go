@@ -131,7 +131,7 @@ func fetchWaybackEntry(client *http.Client, context context.Context, dbConnectio
 	snapshot, err := db.QueryOne[models.FeedSnapshot](
 		context,
 		dbConnection,
-		"SELECT url, timestamp FROM UnfetchedSnapshots ORDER BY timestamp DESC LIMIT 1",
+		"SELECT id, url, timestamp FROM UnfetchedSnapshots JOIN Feeds USING (id) ORDER BY timestamp DESC LIMIT 1",
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return models.FeedSnapshot{}, nil
@@ -158,8 +158,8 @@ func fetchWaybackEntry(client *http.Client, context context.Context, dbConnectio
 		// remove the snapshot.
 		_, removeErr := dbConnection.Exec(
 			context,
-			"DELETE FROM UnfetchedSnapshots WHERE url = $1 AND timestamp = $2",
-			snapshot.Url,
+			"DELETE FROM UnfetchedSnapshots WHERE id = $1 AND timestamp = $2",
+			snapshot.Id,
 			snapshot.Timestamp,
 		)
 		if removeErr != nil {
@@ -172,8 +172,8 @@ func fetchWaybackEntry(client *http.Client, context context.Context, dbConnectio
 	err = db.Transaction(context, dbConnection, func (dbConnection db.Database) error {
 		_, err := dbConnection.Exec(
 			context,
-			"DELETE FROM UnfetchedSnapshots WHERE url = $1 AND timestamp = $2",
-			snapshot.Url,
+			"DELETE FROM UnfetchedSnapshots WHERE id = $1 AND timestamp = $2",
+			snapshot.Id,
 			snapshot.Timestamp,
 		)
 		if err != nil {
@@ -209,27 +209,17 @@ func FetchWaybackEntriesJob(client *http.Client, dbConnection db.Database) *jobs
 func fetchSnapshots(client *http.Client, context context.Context, dbConnection db.Database, feed models.Feed) (int, error) {
 	timeBeforePoll := time.Now()
 
-	// NOTE(simon): Fetch latest snapshot time for this feed.
-	var lastPollTime time.Time
-	err := dbConnection.QueryRow(context, "SELECT updated FROM SnapshotTimes WHERE url = $1", feed.Url).Scan(&lastPollTime)
-	if errors.Is(err, pgx.ErrNoRows) {
-		lastPollTime = time.Time{}
-	}
-	if err != nil {
-		return 0, fmt.Errorf("failed to query latest snapshot time: %w\n", err)
-	}
-
 	// NOTE(simon): Query snapshots since last query.
-	snapshots, err := QuerySnapshots(client, feed.Url, lastPollTime)
+	snapshots, err := QuerySnapshots(client, feed.Url, feed.SnapshotTime)
 	if err != nil {
 		return 0, fmt.Errorf("failed to fetch snapshots %v: %v\n", feed.Url, err)
 	}
 
 	// NOTE(simon): Build all updates into a batch (implicit transaction).
 	batch := pgx.Batch{}
-	batch.Queue("INSERT INTO SnapshotTimes VALUES ($1, $2) ON CONFLICT (url) DO UPDATE SET updated = $2", feed.Url, timeBeforePoll)
+	batch.Queue("UPDATE Feeds SET snapshotTime = $1 WHERE id = $2", timeBeforePoll, feed.Id)
 	for _, snapshot := range snapshots {
-		batch.Queue("INSERT INTO UnfetchedSnapshots VALUES ($1, $2) ON CONFLICT DO NOTHING", feed.Url, snapshot)
+		batch.Queue("INSERT INTO UnfetchedSnapshots VALUES ($1, $2) ON CONFLICT DO NOTHING", feed.Id, snapshot)
 	}
 
 	err = dbConnection.SendBatch(context, &batch).Close()
@@ -242,6 +232,7 @@ func fetchSnapshots(client *http.Client, context context.Context, dbConnection d
 
 func FetchWaybackSnapshotsJob(client *http.Client, dbConnection db.Database) *jobs.Job {
 	job := jobs.NewPeriodic("fetch wayback snapshots", 30 * 24 * time.Hour, func(job *jobs.Job) {
+		job.Logger.Println("Fetching snapshots")
 		feeds, err := db.Query[models.Feed](job.Context, dbConnection, "SELECT * FROM Feeds")
 		if err != nil {
 			job.Logger.Printf("Failed to get feeds: %v", err)

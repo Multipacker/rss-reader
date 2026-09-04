@@ -35,7 +35,8 @@ func (migration Initial) Up(context context.Context, dbConnection db.Database) e
 			title        TEXT      NOT NULL,
 			description  TEXT      NOT NULL,
 			url          TEXT      NOT NULL UNIQUE,
-			updated      TIMESTAMP NOT NULL
+			updated      TIMESTAMP NOT NULL,
+			snapshotTime TIMESTAMP NOT NULL DEFAULT TIMESTAMP 'epoch'
 		);
 
 		CREATE TABLE Entries (
@@ -48,15 +49,10 @@ func (migration Initial) Up(context context.Context, dbConnection db.Database) e
 			updated     TIMESTAMP NOT NULL
 		);
 
-		CREATE TABLE SnapshotTimes (
-			url     TEXT        NOT NULL PRIMARY KEY,
-			updated TIMESTAMPTZ NOT NULL
-		);
-
 		CREATE TABLE UnfetchedSnapshots (
-			url       TEXT      NOT NULL REFERENCES SnapshotTimes(url),
+			id        UUID      NOT NULL REFERENCES Feeds(id),
 			timestamp TIMESTAMP NOT NULL,
-			PRIMARY KEY (url, timestamp)
+			PRIMARY KEY (id, timestamp)
 		);
 	`)
 	if err != nil {

@@ -5,6 +5,7 @@ import (
 )
 
 type FeedSnapshot struct {
+	Id        string
 	Url       string
 	Timestamp time.Time
 }
@@ -15,10 +16,11 @@ type SnapshotTime struct {
 }
 
 type Feed struct {
-	Id          string
-	ExternalId  string
-	Title       string
-	Description string
-	Url         string
-	Updated     time.Time
+	Id           string
+	ExternalId   string
+	Title        string
+	Description  string
+	Url          string
+	Updated      time.Time
+	SnapshotTime time.Time
 }
