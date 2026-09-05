@@ -10,6 +10,7 @@ import (
 
 	"Multipacker/rss-reader/src/db"
 	"Multipacker/rss-reader/src/feedparse"
+	"Multipacker/rss-reader/src/feeds"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -45,7 +46,7 @@ type FeedDescription struct {
 func QueryFeeds(context context.Context, dbConnection db.Database, query string, offset int, size int) ([]FeedDescription, error) {
 	queryWords := strings.Fields(strings.ToLower(query))
 
-	feeds, err := Feeds(context, dbConnection)
+	feeds, err := feeds.Feeds(context, dbConnection)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch feeds: %w", err)
 	}
@@ -56,7 +57,7 @@ func QueryFeeds(context context.Context, dbConnection db.Database, query string,
 		description := FeedDescription{
 			Title: feed.Title,
 			Description: feed.Description,
-			Link: feed.Link,
+			Link: feed.Url,
 		}
 
 		descriptions = append(descriptions, description)
@@ -105,14 +106,6 @@ func QueryFeeds(context context.Context, dbConnection db.Database, query string,
 	return descriptions, nil
 }
 
-func Feeds(context context.Context, dbConnection db.Database) ([]feedparse.Feed, error) {
-	feeds, err := db.Query[feedparse.Feed](context, dbConnection, "SELECT (id, title, description, url as link, updated) FROM Feeds ORDER BY title")
-	if err != nil {
-		return nil, fmt.Errorf("failed to query feeds: %w", err)
-	}
-
-	return feeds, nil
-}
 
 
 

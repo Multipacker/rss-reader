@@ -1,14 +1,29 @@
 package feeds
 
 import (
-	"fmt"
 	"context"
+	"fmt"
+	"net/http"
+	"time"
+	"sync"
+	"log"
 
 	"Multipacker/rss-reader/src/db"
 	"Multipacker/rss-reader/src/feedparse"
+	"Multipacker/rss-reader/src/jobs"
+	"Multipacker/rss-reader/src/models"
 
 	"github.com/jackc/pgx/v5"
 )
+
+func Feeds(context context.Context, dbConnection db.Database) ([]models.Feed, error) {
+	feeds, err := db.Query[models.Feed](context, dbConnection, "SELECT * FROM Feeds ORDER BY title")
+	if err != nil {
+		return nil, fmt.Errorf("failed to query feeds: %w", err)
+	}
+
+	return feeds, nil
+}
 
 func StoreFeed(context context.Context, dbConnection db.Database, feed feedparse.Feed, entries []feedparse.Entry) error {
 	// NOTE(simon): Build all updates into a batch (implicit transaction).
@@ -45,4 +60,135 @@ func StoreFeed(context context.Context, dbConnection db.Database, feed feedparse
 	}
 
 	return nil
+}
+
+type HttpMeta struct {
+	Etag         string
+	LastModified time.Time
+}
+
+var httpMetaCache sync.Map
+
+func pollUrl(client *http.Client, url string) (response *http.Response, changed bool, err error) {
+	// NOTE(simon): Create the request.
+	request, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return
+	}
+
+	// NOTE(simon): Query meta information
+	var meta HttpMeta
+	if metaInterface, hasMeta := httpMetaCache.Load(url); hasMeta {
+		meta = metaInterface.(HttpMeta)
+	}
+
+	// NOTE(simon): Add conditions from previous requests.
+	if !meta.LastModified.IsZero() {
+		request.Header.Add("If-Modified-Since", meta.LastModified.UTC().Format("Mon, 02 Jan 2006 15:04:05 GMT"))
+	}
+	if len(meta.Etag) > 0 {
+		request.Header.Add("If-None-Match", meta.Etag)
+	}
+
+	// NOTE(simon): Content negotiation
+	request.Header.Add("Accept", "application/rss+xml")
+	request.Header.Add("Accept", "application/atom+xml")
+	request.Header.Add("Accept", "application/xml")
+
+	response, err = client.Do(request)
+	if err != nil {
+		return
+	}
+
+	// NOTE(simon): Has the content changed?
+	changed = response.StatusCode != http.StatusNotModified
+
+	// NOTE(simon): Get Etag header
+	meta.Etag = response.Header.Get("Etag")
+
+	// NOTE(simon): Get Last-Modifed header
+	if httpLastModified := response.Header.Get("Last-Modified"); len(httpLastModified) > 0 {
+		formats := []string{
+			time.RFC1123,                   // From HTTP spec
+			"Mon, 2 Jan 2006 15:04:05 MST", // Some don't zero-pad the days
+		}
+
+		// NOTE(simon): Try different time formats until one parses.
+		for _, format := range formats {
+			if parsed, err := time.Parse(format, httpLastModified); err == nil {
+				meta.LastModified = parsed
+				break
+			}
+		}
+
+		// NOTE(simon): Did we parse the header?
+		if meta.LastModified.IsZero() {
+			log.Printf("Failed to parse Last-Modified header '%v'\n", httpLastModified)
+		}
+	}
+
+	// NOTE(simon): Update meta cache.
+	httpMetaCache.Store(url, meta)
+
+	return
+}
+
+func updateFeed(client *http.Client, context context.Context, dbConnection db.Database, url string) error {
+	response, changed, err := pollUrl(client, url)
+	if err != nil {
+		return fmt.Errorf("poll url: %w", err)
+	}
+	defer response.Body.Close()
+
+	// NOTE(simon): On a bad response we just skip this URL.
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("GET %v", response.Status)
+	}
+
+	// NOTE(simon): If nothing changed, we are done!
+	if !changed {
+		return nil
+	}
+
+	feed, entries, err := feedparse.Parse(response.Body, url)
+	if err != nil {
+		return fmt.Errorf("feed parse: %w", err)
+	}
+
+	err = StoreFeed(context, dbConnection, feed, entries)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func UpdateFeedsJob(client *http.Client, dbConnection db.Database) *jobs.Job {
+	job := jobs.NewPeriodic("update feeds", 24 * time.Hour, func (job *jobs.Job) {
+		job.Logger.Println("Updating feeds")
+		beforeUpdate := time.Now()
+
+		feeds, err := Feeds(context.Background(), dbConnection)
+		if err != nil {
+			job.Logger.Println(err)
+		}
+
+		// NOTE(simon): Dispatch updates to all feeds.
+		var wg sync.WaitGroup
+		for _, feed := range feeds {
+			wg.Add(1)
+			go func(link string) {
+				defer wg.Done()
+				err := updateFeed(client, job.Context, dbConnection, link)
+				if err != nil {
+					job.Logger.Println(err)
+				}
+			}(feed.Url)
+		}
+
+		wg.Wait()
+
+		job.Logger.Printf("Feed updated finished: %s\n", time.Since(beforeUpdate))
+	})
+	return job
 }
