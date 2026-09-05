@@ -16,15 +16,6 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-func Feeds(context context.Context, dbConnection db.Database) ([]models.Feed, error) {
-	feeds, err := db.Query[models.Feed](context, dbConnection, "SELECT * FROM Feeds ORDER BY title")
-	if err != nil {
-		return nil, fmt.Errorf("failed to query feeds: %w", err)
-	}
-
-	return feeds, nil
-}
-
 func StoreFeed(context context.Context, dbConnection db.Database, feed feedparse.Feed, entries []feedparse.Entry) error {
 	// NOTE(simon): Build all updates into a batch (implicit transaction).
 	batch := pgx.Batch{}
@@ -168,9 +159,10 @@ func UpdateFeedsJob(client *http.Client, dbConnection db.Database) *jobs.Job {
 		job.Logger.Println("Updating feeds")
 		beforeUpdate := time.Now()
 
-		feeds, err := Feeds(context.Background(), dbConnection)
+		feeds, err := db.Query[models.Feed](job.Context, dbConnection, "SELECT * FROM Feeds")
 		if err != nil {
-			job.Logger.Println(err)
+			job.Logger.Printf("Failed to query feeds: %v\n", err)
+			return
 		}
 
 		// NOTE(simon): Dispatch updates to all feeds.

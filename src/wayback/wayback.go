@@ -235,7 +235,7 @@ func FetchWaybackSnapshotsJob(client *http.Client, dbConnection db.Database) *jo
 		job.Logger.Println("Fetching snapshots")
 		feeds, err := db.Query[models.Feed](job.Context, dbConnection, "SELECT * FROM Feeds")
 		if err != nil {
-			job.Logger.Printf("Failed to get feeds: %v", err)
+			job.Logger.Printf("Failed to fetch feeds: %v", err)
 			return
 		}
 
