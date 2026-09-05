@@ -3,9 +3,11 @@ package db
 import (
 	"context"
 	"fmt"
+	"os"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 
@@ -39,6 +41,16 @@ func Transaction(context context.Context, db Database, transaction func(Database
 }
 
 
+
+func New() (*pgxpool.Pool, error) {
+	// NOTE(simon): Open database connection
+	pool, err := pgxpool.New(context.Background(), os.Getenv("DATABASE_URL"))
+	if err != nil {
+		return nil, fmt.Errorf("pgxpool new: %w", err)
+	}
+
+	return pool, nil
+}
 
 func Query[T any](context context.Context, db Database, sql string, args ...any) ([]T, error) {
 	rows, err := db.Query(context, sql, args...)

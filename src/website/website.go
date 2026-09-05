@@ -10,8 +10,9 @@ import (
 	"os"
 	"time"
 
-	"Multipacker/rss-reader/src/feeds"
+	"Multipacker/rss-reader/src/db"
 	"Multipacker/rss-reader/src/feedparse"
+	"Multipacker/rss-reader/src/feeds"
 	"Multipacker/rss-reader/src/httphelpers"
 	"Multipacker/rss-reader/src/migration"
 	migrationTypes "Multipacker/rss-reader/src/migration/types"
@@ -63,7 +64,7 @@ func Execute() {
 		log.Fatal(fmt.Errorf("failed to read config: %w", err))
 	}
 
-	dbConnection, err := createStorage()
+	dbConnection, err := db.New()
 	if err != nil {
 		log.Fatal(fmt.Errorf("failed to create storage: %w", err))
 	}
