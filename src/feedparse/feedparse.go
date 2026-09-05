@@ -158,7 +158,18 @@ func Parse(reader io.Reader, feedUrl string) (feed Feed, entries []Entry, err er
 		feed.Link        = feedUrl
 		for _, link := range rssFeed.Links {
 			if link.Rel == "self" {
-				feed.Link = link.Href
+				// NOTE(simon): Resolve as a relative link in case the href is relative.
+				parsedFeedUrl, err := url.Parse(feedUrl)
+				if err != nil {
+					return Feed{}, nil, err
+				}
+
+				parsedHref, err := url.Parse(link.Href)
+				if err != nil {
+					return Feed{}, nil, err
+				}
+
+				feed.Link = parsedHref.ResolveReference(parsedFeedUrl).String()
 				break
 			}
 		}
@@ -225,7 +236,18 @@ func Parse(reader io.Reader, feedUrl string) (feed Feed, entries []Entry, err er
 		feed.Link        = feedUrl
 		for _, link := range atomFeed.Links {
 			if link.Rel == "self" {
-				feed.Link = link.Href
+				// NOTE(simon): Resolve as a relative link in case the href is relative.
+				parsedFeedUrl, err := url.Parse(feedUrl)
+				if err != nil {
+					return Feed{}, nil, err
+				}
+
+				parsedHref, err := url.Parse(link.Href)
+				if err != nil {
+					return Feed{}, nil, err
+				}
+
+				feed.Link = parsedHref.ResolveReference(parsedFeedUrl).String()
 				break
 			}
 		}
