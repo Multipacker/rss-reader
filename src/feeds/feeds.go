@@ -173,7 +173,7 @@ func UpdateFeedsJob(client *http.Client, dbConnection db.Database) *jobs.Job {
 				defer wg.Done()
 				err := updateFeed(client, job.Context, dbConnection, link)
 				if err != nil {
-					job.Logger.Println(err)
+					job.Logger.Printf("Failed to update feed %v: %v", link, err)
 				}
 			}(feed.Url)
 		}

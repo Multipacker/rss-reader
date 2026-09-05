@@ -88,13 +88,13 @@ func Execute() {
 			}
 			defer response.Body.Close()
 
-			feed, entries, err := feedparse.Parse(response.Body, feed.Url)
+			parseFeed, entries, err := feedparse.Parse(response.Body, feed.Url)
 			if err != nil {
-				log.Printf("feed parse: %v", err)
+				log.Printf("feed parse %v: %v\n", feed.Url, err)
 				return
 			}
 
-			err = feeds.StoreFeed(context.Background(), dbConnection, feed, entries)
+			err = feeds.StoreFeed(context.Background(), dbConnection, parseFeed, entries)
 			if err != nil {
 				log.Println(err)
 				return
