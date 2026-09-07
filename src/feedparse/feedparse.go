@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 )
@@ -25,6 +26,20 @@ type Feed struct {
 	Description string    `json:"description"`
 	Link        string    `json:"link"`
 	Updated     time.Time `json:"updated"`
+}
+
+func IsAccpetedMimeType(mimetype string) bool {
+	mimeType, mimeSubtype, _ := strings.Cut(mimetype, "/")
+
+	hasValidType := slices.ContainsFunc([]string{ "application", "text" }, func(accepted string) bool {
+		return strings.Contains(mimeType, accepted)
+	})
+
+	hasValidSubtype := slices.ContainsFunc([]string{ "atom", "rss", "xml" }, func(accepted string) bool {
+		return strings.Contains(mimeSubtype, accepted)
+	})
+
+	return hasValidType && hasValidSubtype
 }
 
 func parseRssDateOrNow(raw string) time.Time {
