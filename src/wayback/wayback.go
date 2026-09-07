@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"slices"
-	"strings"
 	"time"
 
 	"Multipacker/rss-reader/src/db"
@@ -28,7 +26,7 @@ func urlFromSnapshot(snapshot models.FeedSnapshot) string {
 	return "https://web.archive.org/web/" + snapshot.Timestamp.Format(TimeFormat) + "id_/" + snapshot.Url
 }
 
-func QuerySnapshots(client *http.Client, feedUrl string, lastPollTime time.Time) ([]time.Time, error) {
+func urlFromFeed(feedUrl string, lastPollTime time.Time, resumeKey string) string {
 	// NOTE(simon): Always valid so skip the error.
 	requestUrl, _ := url.Parse("http://web.archive.org/cdx/search/cdx")
 
@@ -36,24 +34,30 @@ func QuerySnapshots(client *http.Client, feedUrl string, lastPollTime time.Time)
 	// we avoid it. I could not get it to filter for multiple mimetypes
 	// simultaneously, and only filtering for one would require us to do more
 	// queries. Better to do it ourselves.
-	query := url.Values{}
-	query.Set("fl", "timestamp,mimetype")
-	query.Add("filter", "statuscode:200")
-	query.Set("showResumeKey", "true")
-	query.Set("output", "json")
-	query.Set("url", feedUrl)
+	values := url.Values{}
+	values.Set("fl", "timestamp,mimetype")
+	values.Add("filter", "statuscode:200")
+	values.Set("showResumeKey", "true")
+	values.Set("output", "json")
+	values.Set("url", feedUrl)
 	if !lastPollTime.IsZero() {
-		query.Set("from", lastPollTime.UTC().Format(TimeFormat))
+		values.Set("from", lastPollTime.UTC().Format(TimeFormat))
+	}
+	if resumeKey != "" {
+		values.Set("resumeKey", resumeKey)
 	}
 
-	var snapshots []time.Time
-	for {
-		// NOTE(simon): Setup request with custom headers.
-		requestUrl.RawQuery = query.Encode()
+	requestUrl.RawQuery = values.Encode()
 
-		response, err := client.Get(requestUrl.String())
+	return requestUrl.String()
+}
+
+func querySnapshots(client *http.Client, feedUrl string, lastPollTime time.Time) ([]time.Time, error) {
+	var snapshots []time.Time
+	for url := urlFromFeed(feedUrl, lastPollTime, ""); url != ""; {
+		response, err := client.Get(url)
 		if err != nil {
-			return nil, fmt.Errorf("failed to perform http request: %v", err)
+			return nil, fmt.Errorf("failed to perform http request: %w", err)
 		}
 		defer response.Body.Close()
 
@@ -62,65 +66,36 @@ func QuerySnapshots(client *http.Client, feedUrl string, lastPollTime time.Time)
 		var records [][]string
 		err = json.NewDecoder(response.Body).Decode(&records)
 		if err != nil {
-			return nil, fmt.Errorf("failed to parse snapshots: %v", err)
+			return nil, fmt.Errorf("failed to parse snapshots: %w", err)
 		}
 		response.Body.Close()
 
-		// NOTE(simon): We need at least two lines to continue: the header, and
-		// at least one record.
-		if len(records) < 2 {
+		if len(records) == 0 {
 			break
 		}
 
-		// NOTE(simon): Skip the header describing the fields, we request them
-		// in a specific order anyway.
-		records = records[1:]
-
-		// NOTE(simon): Parse resume key if we have one. It is identified by
-		// the second last record being empty and the last one containing the
-		// resume key.
-		resumeKey := ""
-		if len(records) >= 2 {
-			footer := records[len(records) - 2:]
-			if len(footer[0]) == 0 && len(footer[1]) == 1 {
-				resumeKey = footer[1][0]
-				records = records[:len(records) - 2]
+		// NOTE(simon): Parse records. Skip the header describing the fields,
+		// we request them in a specific order anyway.
+		nextUrl := ""
+		for _, line := range records[1:] {
+			if len(line) == 1 {
+				// NOTE(simon): Resume keys are identified by the second last
+				// record being empty and the last one containing the resume
+				// key. We assume that any line that only has one entry is the
+				// resume key.
+				nextUrl = urlFromFeed(feedUrl, lastPollTime, line[0])
+			} else if len(line) == 2 {
+				// NOTE(simon): Just skip entries that don't have an accepted
+				// mimetype or were we cannot parse the timestamp.
+				timestamp, err := time.Parse(TimeFormat, line[0])
+				mimetype       := line[1]
+				if err == nil && feedparse.IsAccpetedMimeType(mimetype) {
+					snapshots = append(snapshots, timestamp)
+				}
 			}
 		}
 
-		// NOTE(simon): Parse records
-		for _, line := range records {
-			// NOTE(simon): We expect two items per line.
-			if len(line) < 2 {
-				continue
-			}
-
-			timestamp, err := time.Parse(TimeFormat, line[0])
-			mimetype       := line[1]
-			if err != nil {
-				return nil, fmt.Errorf("failed to parse snapshot time: %w", err)
-			}
-
-			// NOTE(simon): Do we have a valid mimetype?
-			mimeType, mimeSubtype, _ := strings.Cut(mimetype, "/")
-			hasValidType := slices.ContainsFunc([]string{ "application", "text" }, func(accepted string) bool {
-				return strings.Contains(mimeType, accepted)
-			})
-			hasValidSubtype := slices.ContainsFunc([]string{ "atom", "rss", "xml" }, func(accepted string) bool {
-				return strings.Contains(mimeSubtype, accepted)
-			})
-			if hasValidType && hasValidSubtype {
-				snapshots = append(snapshots, timestamp)
-			}
-		}
-
-		// NOTE(simon): Update query paramters if we have a resume key,
-		// otherwise we are done.
-		if resumeKey != "" {
-			query.Set("resumeKey", resumeKey)
-		} else {
-			break
-		}
+		url = nextUrl
 	}
 
 	return snapshots, nil
@@ -149,7 +124,7 @@ func fetchWaybackEntry(client *http.Client, context context.Context, dbConnectio
 
 	// NOTE(simon): On a bad response we just skip this URL.
 	if response.StatusCode != http.StatusOK {
-		return models.FeedSnapshot{}, fmt.Errorf("failed to fetch snapshot: %v", response.Status)
+		return models.FeedSnapshot{}, fmt.Errorf("failed to fetch snapshot: %w", response.Status)
 	}
 
 	feed, entries, err := feedparse.Parse(response.Body, snapshot.Url)
@@ -210,9 +185,9 @@ func fetchSnapshots(client *http.Client, context context.Context, dbConnection d
 	timeBeforePoll := time.Now()
 
 	// NOTE(simon): Query snapshots since last query.
-	snapshots, err := QuerySnapshots(client, feed.Url, feed.SnapshotTime)
+	snapshots, err := querySnapshots(client, feed.Url, feed.SnapshotTime)
 	if err != nil {
-		return 0, fmt.Errorf("failed to fetch snapshots %v: %v\n", feed.Url, err)
+		return 0, fmt.Errorf("failed to fetch snapshots: %v", err)
 	}
 
 	// NOTE(simon): Build all updates into a batch (implicit transaction).
