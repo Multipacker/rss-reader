@@ -37,6 +37,8 @@ func queryEntries(context context.Context, dbConnection db.Database, query strin
 			Entries.published AS published
 		FROM
 			Entries JOIN Feeds ON feed = Feeds.id
+		WHERE
+			daysToKeep = 0 OR CURRENT_TIMESTAMP - published < make_interval(days => daysToKeep)
 		ORDER BY published
 	`
 	descriptions, err := db.QueryLax[EntryDescription](context, dbConnection, entryQuery)

@@ -208,7 +208,7 @@ func fetchSnapshots(client *http.Client, context context.Context, dbConnection d
 func FetchWaybackSnapshotsJob(client *http.Client, dbConnection db.Database) *jobs.Job {
 	job := jobs.NewPeriodic("fetch wayback snapshots", 30 * 24 * time.Hour, func(job *jobs.Job) {
 		job.Logger.Println("Fetching snapshots")
-		feeds, err := db.Query[models.Feed](job.Context, dbConnection, "SELECT * FROM Feeds")
+		feeds, err := db.Query[models.Feed](job.Context, dbConnection, "SELECT * FROM Feeds WHERE daysToKeep = 0")
 		if err != nil {
 			job.Logger.Printf("Failed to fetch feeds: %v", err)
 			return

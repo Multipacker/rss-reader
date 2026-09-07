@@ -184,3 +184,26 @@ func UpdateFeedsJob(client *http.Client, dbConnection db.Database) *jobs.Job {
 	})
 	return job
 }
+
+func DeleteOldEntriesJob(dbConnection db.Database) *jobs.Job {
+	job := jobs.NewPeriodic("remove old entries", 24 * time.Hour, func (job *jobs.Job) {
+		tag, err := dbConnection.Exec(
+			job.Context,
+			`
+			DELETE FROM Entries
+			WHERE
+				id IN (
+					SELECT Entries.id FROM Entries JOIN Feeds ON (feed = Feeds.id)
+					WHERE
+						daysToKeep != 0 AND CURRENT_TIMESTAMP - published >= make_interval(days => daysToKeep)
+				)
+			`,
+		)
+		if err != nil {
+			job.Logger.Printf("Failed to delete old entries: %v\n", err)
+		} else {
+			job.Logger.Printf("Removed %v rows\n", tag.RowsAffected())
+		}
+	})
+	return job
+}

@@ -36,7 +36,8 @@ func (migration Initial) Up(context context.Context, dbConnection db.Database) e
 			description  TEXT      NOT NULL,
 			url          TEXT      NOT NULL UNIQUE,
 			updated      TIMESTAMP NOT NULL,
-			snapshotTime TIMESTAMP NOT NULL DEFAULT TIMESTAMP 'epoch'
+			snapshotTime TIMESTAMP NOT NULL DEFAULT TIMESTAMP 'epoch',
+			daysToKeep   INT       NOT NULL DEFAULT 0
 		);
 
 		CREATE TABLE Entries (

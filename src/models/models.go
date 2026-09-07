@@ -23,4 +23,5 @@ type Feed struct {
 	Url          string
 	Updated      time.Time
 	SnapshotTime time.Time
+	DaysToKeep   int
 }

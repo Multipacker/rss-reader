@@ -89,13 +89,19 @@ func Execute() {
 			}
 			defer response.Body.Close()
 
-			parseFeed, entries, err := feedparse.Parse(response.Body, feed.Url)
+			parsedFeed, entries, err := feedparse.Parse(response.Body, feed.Url)
 			if err != nil {
 				log.Printf("feed parse %v: %v\n", feed.Url, err)
 				return
 			}
 
-			err = feeds.StoreFeed(context.Background(), dbConnection, parseFeed, entries)
+			err = feeds.StoreFeed(context.Background(), dbConnection, parsedFeed, entries)
+			if err != nil {
+				log.Println(err)
+				return
+			}
+
+			_, err = dbConnection.Exec(context.Background(), "UPDATE Feeds SET daysToKeep = $1 WHERE url = $2", feed.DaysToKeep, parsedFeed.Link)
 			if err != nil {
 				log.Println(err)
 				return
@@ -106,6 +112,7 @@ func Execute() {
 	// NOTE(simon): Start feed update process.
 	wayback.FetchWaybackSnapshotsJob(&client, dbConnection)
 	feeds.UpdateFeedsJob(&client, dbConnection)
+	feeds.DeleteOldEntriesJob(dbConnection)
 	wayback.FetchWaybackEntriesJob(&client, dbConnection)
 
 	handler := NewWebsiteRoutes(*reload, config, dbConnection)
