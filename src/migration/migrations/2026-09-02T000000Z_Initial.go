@@ -34,6 +34,7 @@ func (migration Initial) Up(context context.Context, dbConnection db.Database) e
 			externalId   TEXT      NOT NULL UNIQUE,
 			title        TEXT      NOT NULL,
 			description  TEXT      NOT NULL,
+			feedUrl      TEXT      NOT NULL UNIQUE,
 			url          TEXT      NOT NULL UNIQUE,
 			updated      TIMESTAMP NOT NULL,
 			snapshotTime TIMESTAMP NOT NULL DEFAULT TIMESTAMP 'epoch',

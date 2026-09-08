@@ -101,7 +101,7 @@ func Execute() {
 				return
 			}
 
-			_, err = dbConnection.Exec(context.Background(), "UPDATE Feeds SET daysToKeep = $1 WHERE url = $2", feed.DaysToKeep, parsedFeed.Link)
+			_, err = dbConnection.Exec(context.Background(), "UPDATE Feeds SET daysToKeep = $1 WHERE feedUrl = $2", feed.DaysToKeep, parsedFeed.FeedUrl)
 			if err != nil {
 				log.Println(err)
 				return

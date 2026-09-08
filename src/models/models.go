@@ -20,6 +20,7 @@ type Feed struct {
 	ExternalId   string
 	Title        string
 	Description  string
+	FeedUrl      string
 	Url          string
 	Updated      time.Time
 	SnapshotTime time.Time

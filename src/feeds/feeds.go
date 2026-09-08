@@ -20,13 +20,14 @@ func StoreFeed(context context.Context, dbConnection db.Database, feed feedparse
 	// NOTE(simon): Build all updates into a batch (implicit transaction).
 	batch := pgx.Batch{}
 	batch.Queue(
-		`INSERT INTO Feeds (externalId, title, description, url, updated) VALUES (@id, @title, @description, @url, @updated)
-		ON CONFLICT (externalId) DO UPDATE SET title = @title, description = @description, url = @url, updated = @updated WHERE Feeds.updated < @updated`,
+		`INSERT INTO Feeds (externalId, title, description, feedUrl, url, updated) VALUES (@id, @title, @description, @feedUrl, @url, @updated)
+		ON CONFLICT (externalId) DO UPDATE SET title = @title, description = @description, feedUrl = @feedUrl, url = @url, updated = @updated WHERE Feeds.updated < @updated`,
 		pgx.NamedArgs{
 			"id":          feed.Id,
 			"title":       feed.Title,
 			"description": feed.Description,
-			"url":         feed.Link,
+			"feedUrl":     feed.FeedUrl,
+			"url":         feed.Url,
 			"updated":     feed.Updated,
 		},
 	)
@@ -38,7 +39,7 @@ func StoreFeed(context context.Context, dbConnection db.Database, feed feedparse
 				"id":          entry.Id,
 				"feed":        feed.Id,
 				"title":       entry.Title,
-				"url":         entry.Link,
+				"url":         entry.Url,
 				"published":   entry.Published,
 				"updated":     entry.Updated,
 			},
@@ -175,7 +176,7 @@ func UpdateFeedsJob(client *http.Client, dbConnection db.Database) *jobs.Job {
 				if err != nil {
 					job.Logger.Printf("Failed to update feed %v: %v", link, err)
 				}
-			}(feed.Url)
+			}(feed.FeedUrl)
 		}
 
 		wg.Wait()

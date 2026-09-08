@@ -106,7 +106,7 @@ func fetchWaybackEntry(client *http.Client, context context.Context, dbConnectio
 	snapshot, err := db.QueryOne[models.FeedSnapshot](
 		context,
 		dbConnection,
-		"SELECT id, url, timestamp FROM UnfetchedSnapshots JOIN Feeds USING (id) ORDER BY timestamp DESC LIMIT 1",
+		"SELECT id, feedUrl AS url, timestamp FROM UnfetchedSnapshots JOIN Feeds USING (id) ORDER BY timestamp DESC LIMIT 1",
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return models.FeedSnapshot{}, nil
@@ -185,7 +185,7 @@ func fetchSnapshots(client *http.Client, context context.Context, dbConnection d
 	timeBeforePoll := time.Now()
 
 	// NOTE(simon): Query snapshots since last query.
-	snapshots, err := querySnapshots(client, feed.Url, feed.SnapshotTime)
+	snapshots, err := querySnapshots(client, feed.FeedUrl, feed.SnapshotTime)
 	if err != nil {
 		return 0, fmt.Errorf("failed to fetch snapshots: %v", err)
 	}
@@ -215,12 +215,12 @@ func FetchWaybackSnapshotsJob(client *http.Client, dbConnection db.Database) *jo
 		}
 
 		for _, feed := range feeds {
-			job.Logger.Printf("Fetching snapshots for %v\n", feed.Url)
+			job.Logger.Printf("Fetching snapshots for %v\n", feed.FeedUrl)
 			snapshotCount, err := fetchSnapshots(client, job.Context, dbConnection, feed)
 			if err != nil {
-				job.Logger.Printf("Failed to fetch snapshots for %v: %v\n", feed.Url, err)
+				job.Logger.Printf("Failed to fetch snapshots for %v: %v\n", feed.FeedUrl, err)
 			} else {
-				job.Logger.Printf("Fetched %v new snapthots for %v\n", snapshotCount, feed.Url)
+				job.Logger.Printf("Fetched %v new snapthots for %v\n", snapshotCount, feed.FeedUrl)
 			}
 		}
 	})

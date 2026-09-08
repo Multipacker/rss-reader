@@ -12,20 +12,21 @@ import (
 )
 
 type Entry struct {
-	Id        string    `json:"id"`
-	Feed      string    `json:"feed"`
-	Title     string    `json:"title"`
-	Published time.Time `json:"published"`
-	Updated   time.Time `json:"updated"`
-	Link      string    `json:"link"`
+	Id        string
+	Feed      string
+	Title     string
+	Published time.Time
+	Updated   time.Time
+	Url       string
 }
 
 type Feed struct {
-	Id          string    `json:"id"`
-	Title       string    `json:"title"`
-	Description string    `json:"description"`
-	Link        string    `json:"link"`
-	Updated     time.Time `json:"updated"`
+	Id          string
+	Title       string
+	Description string
+	FeedUrl     string
+	Url         string
+	Updated     time.Time
 }
 
 func IsAccpetedMimeType(mimetype string) bool {
@@ -109,6 +110,11 @@ func parseAtomDateOrNow(raw string) time.Time {
 }
 
 func Parse(reader io.Reader, feedUrl string) (feed Feed, entries []Entry, err error) {
+	parsedFeedUrl, err := url.Parse(feedUrl)
+	if err != nil {
+		return Feed{}, nil, err
+	}
+
 	decoder := xml.NewDecoder(reader)
 
 	// NOTE(simon): Find the first start element to determine the kind of feed we have.
@@ -170,25 +176,30 @@ func Parse(reader io.Reader, feedUrl string) (feed Feed, entries []Entry, err er
 		feed.Title       = strings.TrimSpace(rssFeed.Title)
 		feed.Description = strings.TrimSpace(rssFeed.Description)
 		feed.Updated     = parseRssDateOrNow(rssFeed.LastBuildDate)
-		feed.Link        = feedUrl
+		feed.FeedUrl     = feedUrl
+		feed.Url         = feedUrl
 		for _, link := range rssFeed.Links {
-			if link.Rel == "self" {
-				// NOTE(simon): Resolve as a relative link in case the href is relative.
-				parsedFeedUrl, err := url.Parse(feedUrl)
-				if err != nil {
-					return Feed{}, nil, err
-				}
+			var parsedHref *url.URL
+			if link.Href != "" {
+				parsedHref, err = url.Parse(link.Href)
+			} else {
+				parsedHref, err = url.Parse(link.Chardata)
+			}
+			if err != nil {
+				return Feed{}, nil, err
+			}
+			resolvedUrl := parsedFeedUrl.ResolveReference(parsedHref).String()
 
-				parsedHref, err := url.Parse(link.Href)
-				if err != nil {
-					return Feed{}, nil, err
-				}
-
-				feed.Link = parsedHref.ResolveReference(parsedFeedUrl).String()
-				break
+			switch link.Rel {
+			case "self":
+				feed.FeedUrl = resolvedUrl
+			case "alternate":
+				feed.Url = resolvedUrl
+			case "":
+				feed.Url = resolvedUrl
 			}
 		}
-		feed.Id = feed.Link
+		feed.Id = feed.FeedUrl
 
 		for _, item := range rssFeed.Items {
 			var entry Entry
@@ -196,14 +207,14 @@ func Parse(reader io.Reader, feedUrl string) (feed Feed, entries []Entry, err er
 			entry.Title = strings.TrimSpace(item.Title)
 
 			if _, err := url.Parse(item.Guid.Value); item.Guid.Value != "" && item.Guid.IsPermaLink != "false" && err == nil {
-				entry.Link = item.Guid.Value
+				entry.Url = item.Guid.Value
 			} else {
-				entry.Link = item.Link
+				entry.Url = item.Link
 			}
 			if item.Guid.Value != "" {
 				entry.Id = item.Guid.Value
 			} else {
-				entry.Id = entry.Link
+				entry.Id = entry.Url
 			}
 			entry.Published = parseRssDateOrNow(item.PubDate)
 			entry.Updated   = entry.Published
@@ -248,22 +259,27 @@ func Parse(reader io.Reader, feedUrl string) (feed Feed, entries []Entry, err er
 		feed.Title       = strings.TrimSpace(atomFeed.Title)
 		feed.Description = strings.TrimSpace(atomFeed.Subtitle)
 		feed.Id          = atomFeed.Id
-		feed.Link        = feedUrl
+		feed.FeedUrl     = feedUrl
+		feed.Url         = feedUrl
 		for _, link := range atomFeed.Links {
-			if link.Rel == "self" {
-				// NOTE(simon): Resolve as a relative link in case the href is relative.
-				parsedFeedUrl, err := url.Parse(feedUrl)
-				if err != nil {
-					return Feed{}, nil, err
-				}
+			var parsedHref *url.URL
+			if link.Href != "" {
+				parsedHref, err = url.Parse(link.Href)
+			} else {
+				parsedHref, err = url.Parse(link.Chardata)
+			}
+			if err != nil {
+				return Feed{}, nil, err
+			}
+			resolvedUrl := parsedFeedUrl.ResolveReference(parsedHref).String()
 
-				parsedHref, err := url.Parse(link.Href)
-				if err != nil {
-					return Feed{}, nil, err
-				}
-
-				feed.Link = parsedHref.ResolveReference(parsedFeedUrl).String()
-				break
+			switch link.Rel {
+			case "self":
+				feed.FeedUrl = resolvedUrl
+			case "alternate":
+				feed.Url = resolvedUrl
+			case "":
+				feed.Url = resolvedUrl
 			}
 		}
 		feed.Updated = parseAtomDateOrNow(atomFeed.Updated)
@@ -275,7 +291,7 @@ func Parse(reader io.Reader, feedUrl string) (feed Feed, entries []Entry, err er
 			entry.Id    = atomEntry.Id
 			for _, link := range atomEntry.Links {
 				if link.Rel == "alternate" || link.Rel == "" {
-					entry.Link = link.Href
+					entry.Url = link.Href
 					break
 				}
 			}
