@@ -223,6 +223,15 @@ func FetchWaybackSnapshotsJob(client *http.Client, dbConnection db.Database) *jo
 			} else {
 				job.Logger.Printf("Fetched %v new snapthots for %v\n", snapshotCount, feed.FeedUrl)
 			}
+
+			// NOTE(simon): Don't kick off another fetch if we have been
+			// canceled.
+			select {
+			case <-job.Context.Done():
+				return
+			default:
+				continue
+			}
 		}
 	})
 	return job

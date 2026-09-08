@@ -3,17 +3,22 @@ package website
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"strings"
+	"sync"
 	"time"
 
 	"Multipacker/rss-reader/src/db"
 	"Multipacker/rss-reader/src/feedparse"
 	"Multipacker/rss-reader/src/feeds"
 	"Multipacker/rss-reader/src/httphelpers"
+	"Multipacker/rss-reader/src/jobs"
 	"Multipacker/rss-reader/src/migration"
 	migrationTypes "Multipacker/rss-reader/src/migration/types"
 	"Multipacker/rss-reader/src/wayback"
@@ -109,17 +114,68 @@ func Execute() {
 		}()
 	}
 
-	// NOTE(simon): Start feed update process.
-	wayback.FetchWaybackSnapshotsJob(&client, dbConnection)
-	feeds.UpdateFeedsJob(&client, dbConnection)
-	feeds.DeleteOldEntriesJob(dbConnection)
-	wayback.FetchWaybackEntriesJob(&client, dbConnection)
+	var wg sync.WaitGroup
 
-	handler := NewWebsiteRoutes(*reload, config, dbConnection)
-
-	address := fmt.Sprintf("%s:%d", config.Host, config.Port)
-	log.Printf("INFO: Serving on http://%s", address)
-	if err := http.ListenAndServe(address, handler); err != nil {
-		log.Fatal(err)
+	// NOTE(simon): Start background jobs.
+	wg.Add(1)
+	backgroundJobs := jobs.Jobs{
+		feeds.UpdateFeedsJob(&client, dbConnection),
+		feeds.DeleteOldEntriesJob(dbConnection),
+		wayback.FetchWaybackSnapshotsJob(&client, dbConnection),
+		wayback.FetchWaybackEntriesJob(&client, dbConnection),
 	}
+
+	// NOTE(simon): Start HTTP server.
+	wg.Add(1)
+	server := http.Server{
+		Addr:    fmt.Sprintf("%s:%d", config.Host, config.Port),
+		Handler: NewWebsiteRoutes(*reload, config, dbConnection),
+	}
+	go func() {
+		log.Printf("Serving on http://%s\n", server.Addr)
+		err := server.ListenAndServe()
+		if !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("Server shut down unexpectedly: %v\n", err)
+		}
+	}()
+
+	// NOTE(simon): Wait for SIGINT in the background and trigger graceful shut down.
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt)
+	go func() {
+		// NOTE(simon): Start shut down.
+		<-signals
+		log.Println("Shutting down")
+
+		timeout := 10 * time.Second
+
+		// NOTE(simon): Shut down background jobs.
+		go func() {
+			unfinished := backgroundJobs.CancelAndWait(timeout)
+			if len(unfinished) == 0 {
+				log.Println("Background jobs closed gracefully")
+			} else {
+				log.Printf("Background jobs did not finish by the deadline: %v\n", strings.Join(unfinished, ", "))
+			}
+			wg.Done()
+		}()
+
+		// NOTE(simon): Shut down the HTTP server.
+		go func() {
+			timeoutContext, cancel := context.WithTimeout(context.Background(), timeout)
+			defer cancel()
+			err := server.Shutdown(timeoutContext)
+			if err != nil {
+				log.Printf("Server did not shut down gracefully: %v\n", err)
+			}
+			wg.Done()
+		}()
+
+		// NOTE(simon): Force quit.
+		<-signals
+		log.Printf("Forcibly killed the website, unfinished background jobs: %v\n", strings.Join(backgroundJobs.ListUnfinished(), ", "))
+		os.Exit(1)
+	}()
+
+	wg.Wait()
 }
