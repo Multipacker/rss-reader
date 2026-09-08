@@ -61,9 +61,9 @@ type HttpMeta struct {
 
 var httpMetaCache sync.Map
 
-func pollUrl(client *http.Client, url string) (response *http.Response, changed bool, err error) {
+func pollUrl(client *http.Client, context context.Context, url string) (response *http.Response, changed bool, err error) {
 	// NOTE(simon): Create the request.
-	request, err := http.NewRequest("GET", url, nil)
+	request, err := http.NewRequestWithContext(context, "GET", url, nil)
 	if err != nil {
 		return
 	}
@@ -126,7 +126,7 @@ func pollUrl(client *http.Client, url string) (response *http.Response, changed 
 }
 
 func updateFeed(client *http.Client, context context.Context, dbConnection db.Database, url string) error {
-	response, changed, err := pollUrl(client, url)
+	response, changed, err := pollUrl(client, context, url)
 	if err != nil {
 		return fmt.Errorf("poll url: %w", err)
 	}

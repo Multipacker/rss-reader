@@ -1,12 +1,27 @@
 package httphelpers
 
 import (
+	"bytes"
+	"context"
 	"io"
 	"net/http"
-	"bytes"
 	"slices"
 	"time"
 )
+
+func GetWithContext(client *http.Client, context context.Context, url string) (*http.Response, error) {
+	request, err := http.NewRequestWithContext(context, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, err
+	}
+
+	return response, nil
+}
 
 type RoundTripperFunc func(request *http.Request) (*http.Response, error)
 

@@ -12,6 +12,7 @@ import (
 	"Multipacker/rss-reader/src/db"
 	"Multipacker/rss-reader/src/feedparse"
 	"Multipacker/rss-reader/src/feeds"
+	"Multipacker/rss-reader/src/httphelpers"
 	"Multipacker/rss-reader/src/jobs"
 	"Multipacker/rss-reader/src/models"
 
@@ -52,10 +53,10 @@ func urlFromFeed(feedUrl string, lastPollTime time.Time, resumeKey string) strin
 	return requestUrl.String()
 }
 
-func querySnapshots(client *http.Client, feedUrl string, lastPollTime time.Time) ([]time.Time, error) {
+func querySnapshots(client *http.Client, context context.Context, feedUrl string, lastPollTime time.Time) ([]time.Time, error) {
 	var snapshots []time.Time
 	for url := urlFromFeed(feedUrl, lastPollTime, ""); url != ""; {
-		response, err := client.Get(url)
+		response, err := httphelpers.GetWithContext(client, context, url)
 		if err != nil {
 			return nil, fmt.Errorf("failed to perform http request: %w", err)
 		}
@@ -115,7 +116,7 @@ func fetchWaybackEntry(client *http.Client, context context.Context, dbConnectio
 		return models.FeedSnapshot{}, fmt.Errorf("failed to get latest snapshot: %w", err)
 	}
 
-	response, err := client.Get(urlFromSnapshot(snapshot))
+	response, err := httphelpers.GetWithContext(client, context, urlFromSnapshot(snapshot))
 	if err != nil {
 		return models.FeedSnapshot{}, fmt.Errorf("failed to fetch snapshot: %w", err)
 	}
@@ -185,7 +186,7 @@ func fetchSnapshots(client *http.Client, context context.Context, dbConnection d
 	timeBeforePoll := time.Now()
 
 	// NOTE(simon): Query snapshots since last query.
-	snapshots, err := querySnapshots(client, feed.FeedUrl, feed.SnapshotTime)
+	snapshots, err := querySnapshots(client, context, feed.FeedUrl, feed.SnapshotTime)
 	if err != nil {
 		return 0, fmt.Errorf("failed to fetch snapshots: %v", err)
 	}
