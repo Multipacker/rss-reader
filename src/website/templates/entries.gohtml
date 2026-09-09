@@ -2,7 +2,7 @@
 
 <html lang="en-us">
     <head>
-        <title>RSS Feed</title>
+        <title>SilverFeed</title>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <link rel="stylesheet" href="/static/style.css">
@@ -11,11 +11,21 @@
         <script src="/static/helpers.js"></script>
         <script src="/static/datetime.js"></script>
         <script src="/static/read_articles.js"></script>
+        <script src="/static/toggle.js"></script>
     </head>
     <body style="margin: 0;">
         <main style="display: flex; flex-direction: column; gap: 0.5em;">
-            <h1 style="text-align: center; margin-bottom: 0;">RSS Feed</h1>
-
+            <header>
+                <button style="float: left; bottom: 0;" type="button" class="mobile-menu" data-toggle-for="#navigation">=</button>
+                <h1 style="text-align: center; margin-bottom: 0;">SilverFeed</h1>
+            </header>
+            <div id="navigation">
+                <button style="float: right;" type="button" class="mobile-menu" data-toggle-for="#navigation">X</button>
+                <nav>
+                    <a href="/entries">Entries</a>
+                    <a href="/feeds">Feeds</a>
+                </nav>
+            </div>
             <form style="display: flex; justify-content: center; flex-wrap: wrap; gap: 0.5em; margin-left: 0.5em; margin-right: 0.5em;" hx-target="#results" hx-swap="innerHTML scroll:top">
                 <select name="order" hx-post="/entries">
                     <option value="newest">Newest first</option>
@@ -28,7 +38,6 @@
                 </select>
                 <input name="query" style="flex: 1;" placeholder="Search..." type="search" hx-trigger="search, keyup changed delay:200ms" hx-post="/entries">
             </form>
-
             <div id="results">
                 <span
                     class="item"

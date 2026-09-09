@@ -2,19 +2,29 @@
 
 <html lang="en-us">
     <head>
-        <title>RSS Feed</title>
+        <title>SilverFeed</title>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <link rel="stylesheet" href="/static/style.css">
         <link rel="icon" href="/static/favicon.svg">
         <script src="/static/htmx@2.0.10.min.js"></script>
+        <script src="/static/helpers.js"></script>
+        <script src="/static/toggle.js"></script>
     </head>
     <body style="margin: 0;">
         <main style="display: flex; flex-direction: column; gap: 0.5em;">
-            <h1 style="text-align: center; margin-bottom: 0;">RSS Feed</h1>
-
+            <header>
+                <button style="float: left; bottom: 0;" type="button" data-toggle-for="#navigation">=</button>
+                <h1 style="text-align: center; margin-bottom: 0;">SilverFeed</h1>
+            </header>
+            <div id="navigation">
+                <button style="float: right;" type="button" data-toggle-for="#navigation">X</button>
+                <nav>
+                    <a href="/entries">Entries</a>
+                    <a href="/feeds">Feeds</a>
+                </nav>
+            </div>
             <input name="query" placeholder="Search..." type="search" hx-trigger="search, keyup changed delay:200ms" hx-post="/feeds" hx-target="#results" hx-swap="innerHTML scroll:top">
-
             <div id="results">
                 <span
                     class="item"
